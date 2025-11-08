@@ -1,0 +1,52 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "neurotalk"
+version = "0.1.0"
+description = "NeuroTalk - Real-time Voice Activity Detection and Speech-to-Text"
+authors = [
+    {name = "Your Name", email = "your.email@example.com"},
+]
+dependencies = [
+    "streamlit>=1.28.0",
+    "openai-whisper>=20231117",
+    "webrtcvad>=2.0.10",
+    "numpy>=1.24.0",
+    "scipy>=1.11.0",
+    "pyaudio>=0.2.11",
+    "pydub>=0.25.1",
+    "python-dotenv>=1.0.0",
+    "loguru>=0.7.0",
+    "plotly>=5.17.0",
+    "torch>=2.0.0",
+    "websockets>=12.0",
+    "asyncio-mqtt>=0.16.1",
+]
+requires-python = ">=3.9"
+
+[tool.hatch.build.targets.wheel]
+packages = ["utils"]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "black>=23.0.0",
+    "isort>=5.12.0",
+    "flake8>=6.0.0",
+]
+
+[tool.black]
+line-length = 88
+target-version = ['py39']
+
+[tool.isort]
+profile = "black"
+line_length = 88
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
