@@ -1,6 +1,41 @@
 """
 NeuroTalk Real-time - WebSocket-based Voice Activity Detection and Speech-to-Text.
-Fixed version with proper port management and error handling.
+
+=== ARCHITECTURE OVERVIEW ===
+
+This application uses a WebSocket-based architecture for real-time voice processing:
+
+FLOW: Browser → WebSocket → Python → Whisper → WebSocket → Browser → Streamlit
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 1. BROWSER (JavaScript - realtime_audio.js)                                │
+│    - Captures microphone audio using Web Audio API                          │
+│    - Converts audio to PCM format (16-bit, 16kHz)                          │
+│    - Sends audio chunks via WebSocket every ~100ms                         │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ 2. WEBSOCKET SERVER (Python - websocket_server.py)                         │
+│    - Receives audio chunks from browser                                     │
+│    - Decodes base64 audio data                                             │
+│    - Feeds chunks to VAD (Voice Activity Detection)                        │
+│    - Buffers speech segments                                               │
+│    - Triggers Whisper transcription when silence detected                  │
+│    - Sends transcription back to browser                                    │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ 3. BROWSER (JavaScript - receives transcription)                           │
+│    - Receives transcription from WebSocket                                  │
+│    - Sends event to Streamlit via Streamlit.setComponentValue()           │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ 4. STREAMLIT (Python - app.py - THIS FILE)                                │
+│    - Receives event from component                                          │
+│    - Updates session state with transcription                              │
+│    - Displays in UI (tabs: Recording, Statistics, History)                 │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+KEY COMPONENTS:
+- realtime_audio_component.py: Streamlit custom component (HTML/JS bridge)
+- realtime_audio.js: Browser-side audio capture and WebSocket client
+- websocket_server.py: Python WebSocket server with VAD and Whisper
+- app.py (this file): Streamlit UI and event handling
 """
 
 import streamlit as st
@@ -15,7 +50,15 @@ from components.realtime_audio_component import realtime_audio_component
 
 
 def init_session_state():
-    """Initialize session state variables."""
+    """
+    Initialize Streamlit session state variables.
+    
+    Session state persists across Streamlit reruns and stores:
+    - websocket_started: Flag indicating if WebSocket server is running
+    - transcriptions: List of all transcribed text with metadata
+    - audio_stats: Real-time statistics (chunks processed, speech detected, etc.)
+    - connection_status: Boolean indicating if browser is connected to WebSocket
+    """
     if 'websocket_started' not in st.session_state:
         st.session_state.websocket_started = False
     if 'transcriptions' not in st.session_state:
@@ -32,7 +75,17 @@ def init_session_state():
 
 
 def start_websocket_server():
-    """Start WebSocket server if not already running."""
+    """
+    Start the Python WebSocket server in a background thread.
+    
+    STEP 1 of the audio processing pipeline:
+    - Creates a WebSocket server listening on ws://localhost:8765
+    - Server runs in a separate thread to not block Streamlit
+    - Waits for browser connections to send/receive audio data
+    
+    Returns:
+        bool: True if server started successfully or already running
+    """
     if not st.session_state.websocket_started:
         try:
             with st.spinner("Starting WebSocket server..."):
@@ -110,16 +163,46 @@ def render_settings():
 
 
 def handle_component_event(event_data: Optional[Dict[str, Any]]):
-    """Handle events from the real-time audio component."""
+    """
+    Handle events from the JavaScript component.
+    
+    STEP 4 of the audio processing pipeline - FINAL STEP:
+    This is where the transcription results arrive back in Python/Streamlit!
+    
+    EVENT FLOW:
+    1. Browser JavaScript receives transcription from WebSocket server
+    2. JavaScript calls: Streamlit.setComponentValue({event: "transcription", data: {...}})
+    3. Streamlit detects the component value changed
+    4. This function is called with the event data
+    5. We update session state and UI
+    
+    EVENT TYPES:
+    - "transcription": Final text from Whisper (triggered after speech + silence)
+    - "audio_processed": Real-time stats (sent ~every 100ms during recording)
+    - "connection_change": WebSocket connection status
+    - "recording_started": User clicked "Start Recording"
+    - "recording_stopped": User clicked "Stop Recording"
+    - "error": Any error from browser/WebSocket
+    
+    Args:
+        event_data: Dictionary with 'event' (type) and 'data' (payload) keys
+    """
     if not event_data:
         return
     
-    # Safely get event type and data
+    # Safely extract event type and data from the component
     event_type = event_data.get("event", "") if isinstance(event_data, dict) else ""
     data = event_data.get("data", {}) if isinstance(event_data, dict) else {}
     
     logger.debug(f"Event received: {event_type}, data keys: {data.keys() if isinstance(data, dict) else 'not a dict'}")
     
+    # === TRANSCRIPTION EVENT ===
+    # This is the final result after:
+    # 1. Browser captured audio
+    # 2. WebSocket server received chunks
+    # 3. VAD detected speech
+    # 4. Whisper transcribed the audio
+    # 5. Result sent back via WebSocket
     if event_type == "transcription":
         text = data.get("text", "") if isinstance(data, dict) else ""
         if text and text.strip():
@@ -133,9 +216,16 @@ def handle_component_event(event_data: Optional[Dict[str, Any]]):
             logger.info(f"Transcription added: {len(st.session_state.transcriptions)} total")
             st.success(f"🗣️ **[{transcription['language'].upper()}]** {transcription['text']}")
     
+    # === AUDIO PROCESSED EVENT ===
+    # Sent continuously (~every 100ms) while recording
+    # Contains real-time statistics from the WebSocket server:
+    # - total_chunks: Number of audio chunks received
+    # - speech_chunks: Number of chunks containing speech (VAD detected)
+    # - buffer_duration: Current audio buffer size in seconds
+    # - max_amplitude: Peak audio level (for visualizations)
     elif event_type == "audio_processed":
         if isinstance(data, dict):
-            # Update stats with latest values
+            # Update session state with latest statistics
             if 'total_chunks' in data:
                 st.session_state.audio_stats['total_chunks'] = data.get('total_chunks', 0)
             if 'speech_chunks' in data:
@@ -362,16 +452,27 @@ def main():
         5. Click **"⏹️ Stop Recording"** when finished
         """)
         
-        # Real-time audio component
+        # === STEP 2 & 3: RENDER THE AUDIO COMPONENT ===
+        # This creates an iframe with JavaScript that:
+        # 1. Captures microphone audio in the browser (Web Audio API)
+        # 2. Connects to WebSocket server at ws://localhost:8765
+        # 3. Sends audio chunks to Python server
+        # 4. Receives transcriptions back from server
+        # 5. Sends events to Streamlit via setComponentValue()
+        #
+        # The component returns data whenever JavaScript calls setComponentValue()
+        # This happens for: transcription, audio_processed, connection_change, etc.
         try:
             component_data = realtime_audio_component(
-                websocket_url="ws://localhost:8765",
-                vad_aggressiveness=settings["vad_aggressiveness"],
-                sample_rate=settings["sample_rate"],
-                whisper_model=settings["whisper_model"]
+                websocket_url="ws://localhost:8765",  # Where Python WebSocket server is listening
+                vad_aggressiveness=settings["vad_aggressiveness"],  # Passed to server
+                sample_rate=settings["sample_rate"],  # Audio quality (16kHz recommended)
+                whisper_model=settings["whisper_model"]  # Which Whisper model to use
             )
             
-            # Handle component events
+            # === STEP 4: HANDLE EVENTS FROM COMPONENT ===
+            # When component_data changes (JavaScript sent new data), process it
+            # This is where transcriptions arrive back in Python!
             handle_component_event(component_data)
         
         except Exception as e:
@@ -386,6 +487,86 @@ def main():
 
 
 if __name__ == "__main__":
+    """
+    =============================================================================
+    COMPLETE DATA FLOW SUMMARY - From Browser to Transcription
+    =============================================================================
+    
+    USER ACTION: User clicks "Start Recording" and speaks
+    
+    ┌─────────────────────────────────────────────────────────────────────────┐
+    │ STEP 1: BROWSER CAPTURES AUDIO (JavaScript - realtime_audio.js)        │
+    │─────────────────────────────────────────────────────────────────────────│
+    │ 1. Web Audio API accesses microphone                                    │
+    │ 2. AudioWorkletProcessor captures raw audio samples                     │
+    │ 3. Converts to PCM 16-bit format at 16kHz sample rate                  │
+    │ 4. Chunks audio into ~100ms segments                                    │
+    │ 5. Base64 encodes the audio data                                        │
+    │ 6. Sends via WebSocket:                                                 │
+    │    ws.send(JSON.stringify({                                             │
+    │      type: "audio_chunk",                                               │
+    │      audio_data: base64EncodedAudio                                     │
+    │    }))                                                                   │
+    └─────────────────────────────────────────────────────────────────────────┘
+                                      ↓ WebSocket
+    ┌─────────────────────────────────────────────────────────────────────────┐
+    │ STEP 2: PYTHON SERVER PROCESSES (websocket_server.py)                  │
+    │─────────────────────────────────────────────────────────────────────────│
+    │ 1. WebSocket server receives message on port 8765                       │
+    │ 2. Decodes base64 audio to bytes                                        │
+    │ 3. Converts bytes to NumPy array (float32)                             │
+    │ 4. Feeds to VAD (Voice Activity Detection):                            │
+    │    - WebRTC VAD analyzes 30ms frames                                    │
+    │    - Returns True/False for each frame (speech detected?)              │
+    │ 5. If speech detected:                                                  │
+    │    - Adds audio to buffer                                              │
+    │    - Updates statistics (total_chunks, speech_chunks, etc.)            │
+    │    - Sends stats back to browser via WebSocket                         │
+    │ 6. When silence detected after speech (>1 second):                     │
+    │    - Triggers Whisper transcription on buffered audio                  │
+    │    - Whisper returns: {text, language, duration}                       │
+    │    - Sends transcription back to browser via WebSocket                 │
+    │    - Clears buffer for next speech segment                             │
+    └─────────────────────────────────────────────────────────────────────────┘
+                                      ↓ WebSocket
+    ┌─────────────────────────────────────────────────────────────────────────┐
+    │ STEP 3: BROWSER RECEIVES RESULT (JavaScript)                           │
+    │─────────────────────────────────────────────────────────────────────────│
+    │ 1. WebSocket onmessage handler receives:                                │
+    │    {type: "transcription", text: "hello world", language: "en"}        │
+    │ 2. Updates UI (shows transcription in component)                        │
+    │ 3. Sends to Streamlit via:                                              │
+    │    Streamlit.setComponentValue({                                        │
+    │      event: "transcription",                                            │
+    │      data: {text, language, duration},                                  │
+    │      timestamp: Date.now()                                              │
+    │    })                                                                    │
+    └─────────────────────────────────────────────────────────────────────────┘
+                                      ↓ Streamlit Bridge
+    ┌─────────────────────────────────────────────────────────────────────────┐
+    │ STEP 4: STREAMLIT UI UPDATES (app.py - THIS FILE)                      │
+    │─────────────────────────────────────────────────────────────────────────│
+    │ 1. Streamlit detects component value changed                            │
+    │ 2. Calls: handle_component_event(event_data)                           │
+    │ 3. Extracts transcription text                                          │
+    │ 4. Updates session_state.transcriptions list                           │
+    │ 5. Displays in UI:                                                      │
+    │    - Shows success message with text                                    │
+    │    - Updates "History" tab                                              │
+    │    - Updates counters                                                   │
+    └─────────────────────────────────────────────────────────────────────────┘
+    
+    RESULT: User sees their spoken words as text in the Streamlit UI!
+    
+    TIMING:
+    - Audio chunks sent every ~100ms
+    - VAD processes each chunk in <5ms
+    - Transcription triggered after 1 second of silence
+    - Whisper transcription takes 0.5-2 seconds (depending on model)
+    - Total latency: ~2-4 seconds from speech end to displayed text
+    
+    =============================================================================
+    """
     try:
         main()
     except Exception as e:
