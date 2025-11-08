@@ -285,7 +285,7 @@ class WebSocketAudioServer:
         
         logger.info(f"WebSocket server initialized on {host}:{port}")
     
-    async def handle_client(self, websocket, path):
+    async def handle_client(self, websocket):
         """Handle WebSocket client connection."""
         client_id = f"{websocket.remote_address[0]}:{websocket.remote_address[1]}"
         self.clients.add(websocket)
