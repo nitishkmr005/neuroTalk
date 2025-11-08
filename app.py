@@ -1,6 +1,147 @@
 """
 NeuroTalk Real-time - WebSocket-based Voice Activity Detection and Speech-to-Text.
 
+=================================================================================
+                        FUNCTION CALL MINDMAP
+=================================================================================
+
+                            [USER OPENS APP]
+                                  |
+                                  v
+                            main() ──────────────────────────────────┐
+                              |                                       |
+                              |                                       |
+            ┌─────────────────┼───────────────────┐                 |
+            |                 |                   |                 |
+            v                 v                   v                 |
+    init_session_state()  render_settings()  start_websocket_server()
+    │                     │                   │                     |
+    │ Creates:            │ Returns:          │ Starts:             |
+    │ - transcriptions[]  │ - vad_level       │ - WebSocket         |
+    │ - audio_stats{}     │ - whisper_model   │   server thread     |
+    │ - connection_status │ - sample_rate     │ - Port 8765         |
+                          │                   │                     |
+                          │                   v                     |
+                          │         start_websocket_server_background()
+                          │         (websocket_server.py)           |
+                          │                   │                     |
+                          │                   v                     |
+                          │         WebSocketAudioServer.__init__() |
+                          │                   │                     |
+                          │                   v                     |
+                          │         WebSocketAudioServer.run_server()
+                          │                   │                     |
+                          │                   v                     |
+                          │         WebSocketAudioServer.handle_client()
+                          │                   │                     |
+                          └───────────────────┼─────────────────────┘
+                                              |
+                                              v
+                          realtime_audio_component() ←──────┐
+                          (renders HTML/JS iframe)          |
+                                  |                         |
+                ┌─────────────────┴──────────────┐         |
+                |                                |         |
+        [USER CLICKS "CONNECT"]        [USER CLICKS "START RECORDING"]
+                |                                |
+                v                                v
+        JavaScript: connectWebSocket()   JavaScript: startRecording()
+                |                                |
+                v                                |
+        Opens ws://localhost:8765                |
+                |                                |
+                v                                v
+        WebSocket.onopen                 navigator.mediaDevices.getUserMedia()
+                |                                |
+                |                                v
+                |                        AudioWorkletProcessor.process()
+                |                                |
+                |                                v
+                |                        [Captures audio samples]
+                |                                |
+                |                                v
+                |                        sendAudioChunk(base64Audio)
+                |                                |
+                v                                v
+        ┌───────────────────────────────────────────────────────┐
+        │    WebSocketAudioServer.handle_client()               │
+        │    (receives WebSocket message)                       │
+        └───────────────────────────────────────────────────────┘
+                                |
+                                v
+                    WebSocketAudioServer.process_message()
+                                |
+                ┌───────────────┴───────────────┐
+                |                               |
+        [type: "init"]                 [type: "audio_chunk"]
+                |                               |
+                v                               v
+        Initialize processor        RealTimeVoiceProcessor.process_audio_chunk()
+                |                               |
+                |                               v
+                |                   VoiceActivityDetector.process_audio_chunks()
+                |                               |
+                |               ┌───────────────┴───────────────┐
+                |               |                               |
+                |           [Speech Detected]           [No Speech / Silence]
+                |               |                               |
+                |               v                               v
+                |       Buffer audio                    [After >1s silence]
+                |       Send stats back                         |
+                |               |                               v
+                |               |               SpeechToTextProcessor.transcribe_audio()
+                |               |                       (Whisper Model)
+                |               |                               |
+                |               |                               v
+                |               |                   {text, language, duration}
+                |               |                               |
+                |               |                               v
+                |               |                   Send via WebSocket
+                |               |                               |
+                |               └───────────────┬───────────────┘
+                |                               |
+                v                               v
+        ┌───────────────────────────────────────────────────────┐
+        │    JavaScript: WebSocket.onmessage                    │
+        │    (receives transcription or stats)                  │
+        └───────────────────────────────────────────────────────┘
+                                |
+                ┌───────────────┴───────────────┐
+                |                               |
+        [type: "transcription"]        [type: "audio_processed"]
+                |                               |
+                v                               v
+        onTranscription(data)          onAudioProcessed(data)
+                |                               |
+                v                               v
+        Streamlit.setComponentValue()  Streamlit.setComponentValue()
+        {event: "transcription"}       {event: "audio_processed"}
+                |                               |
+                └───────────────┬───────────────┘
+                                |
+                                v
+                ┌───────────────────────────────────────┐
+                │  handle_component_event(event_data)   │
+                │  (THIS FILE - app.py)                 │
+                └───────────────────────────────────────┘
+                                |
+                ┌───────────────┴───────────────┐
+                |                               |
+        [event: "transcription"]       [event: "audio_processed"]
+                |                               |
+                v                               v
+        Update session_state           Update session_state
+        .transcriptions[]              .audio_stats{}
+                |                               |
+                v                               v
+        st.success(text)               (stats updated silently)
+                |                               |
+                v                               v
+        render_transcription_history()  render_statistics()
+        (displays in "History" tab)     (displays in "Statistics" tab)
+
+=================================================================================
+
 === ARCHITECTURE OVERVIEW ===
 
 This application uses a WebSocket-based architecture for real-time voice processing:
