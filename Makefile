@@ -13,7 +13,7 @@ LLM_MODEL     = gemma4:latest
 setup: backend-install frontend-install
 
 backend-install:
-	$(UV_BACKEND) sync
+	$(UV_BACKEND) sync --group chatterbox_model
 
 frontend-install:
 	$(NPM_FRONTEND) install
