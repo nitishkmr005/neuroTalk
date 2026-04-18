@@ -4,6 +4,14 @@ import { startTransition, useCallback, useEffect, useRef, useState, type CSSProp
 
 type Mode = "listening" | "thinking" | "responding";
 
+type ChatMessage = {
+  id: string;
+  role: "user" | "assistant";
+  text: string;
+  isStreaming: boolean;
+  isError: boolean;
+};
+
 type Metrics = {
   request_read_ms: number;
   file_write_ms: number;
@@ -28,12 +36,13 @@ type DebugInfo = {
 };
 
 type StreamMessage = {
-  type: "ready" | "partial" | "final" | "error";
+  type: "ready" | "partial" | "final" | "error" | "llm_start" | "llm_partial" | "llm_final" | "llm_error";
   request_id?: string;
   text?: string;
   message?: string;
   timings_ms?: Metrics;
   debug?: DebugInfo;
+  llm_ms?: number;
 };
 
 const modeConfig: Record<
@@ -69,10 +78,10 @@ const modeConfig: Record<
 };
 
 const orchestrationSteps = [
-  { label: "Live listening", detail: "Captures the ongoing conversation while the associate is speaking with the customer.", status: "online" },
-  { label: "Transcript stream", detail: "Updates the written conversation view during the call instead of waiting for the end.", status: "online" },
-  { label: "Audio health", detail: "Shows whether the current voice input is strong, quiet, or inactive.", status: "stable" },
-  { label: "Conversation review", detail: "Keeps the latest transcript ready for confirmation, notes, and follow-up.", status: "online" },
+  { label: "Microphone capture", detail: "PCM audio streamed in real-time over WebSocket to the backend.", status: "online" },
+  { label: "Speech-to-Text (STT)", detail: "faster-whisper transcribes audio incrementally with VAD filtering.", status: "online" },
+  { label: "LLM reasoning", detail: "Ollama (llama3.2) responds to the transcript as speech is detected.", status: "online" },
+  { label: "Text-to-Speech (TTS)", detail: "Voice synthesis — coming soon to complete the full voice loop.", status: "pending" },
 ];
 
 const waveformHeights = [28, 46, 32, 64, 24, 58, 38, 72, 44, 30, 66, 35, 54, 26, 60, 40];
@@ -115,13 +124,18 @@ export function VoiceAgentConsole() {
   const [isRecording, setIsRecording] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
   const [isFinalizing, setIsFinalizing] = useState(false);
-  const [transcript, setTranscript] = useState("Start recording to stream microphone audio and see live transcription updates.");
+  const [transcript, setTranscript] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [metrics, setMetrics] = useState<Metrics | null>(null);
   const [debugInfo, setDebugInfo] = useState<DebugInfo | null>(null);
   const [amplitude, setAmplitude] = useState(0.08);
   const [waveLevels, setWaveLevels] = useState(initialWaveLevels);
   const [copied, setCopied] = useState(false);
+  const [llmLatencyMs, setLlmLatencyMs] = useState<number | null>(null);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const activeUserIdRef = useRef<string | null>(null);
+  const activeAssistantIdRef = useRef<string | null>(null);
+  const chatEndRef = useRef<HTMLDivElement | null>(null);
 
   const websocketRef = useRef<WebSocket | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
@@ -134,6 +148,7 @@ export function VoiceAgentConsole() {
   const isFinalizingRef = useRef(false);
   const receivedFinalRef = useRef(false);
   const normalCloseRef = useRef(false);
+  const isRecordingRef = useRef(false);
   const errorRef = useRef<string | null>(null);
   const amplitudeRef = useRef(0.08);
   const waveLevelsRef = useRef(initialWaveLevels);
@@ -141,6 +156,10 @@ export function VoiceAgentConsole() {
   useEffect(() => {
     errorRef.current = error;
   }, [error]);
+
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages]);
 
   const stopAudioGraph = () => {
     processorNodeRef.current?.disconnect();
@@ -195,7 +214,10 @@ export function VoiceAgentConsole() {
       setError(null);
       setMetrics(null);
       setDebugInfo(null);
-      setTranscript("Opening the microphone and connecting to the backend stream...");
+      setTranscript("");
+      setLlmLatencyMs(null);
+      activeUserIdRef.current = null;
+      activeAssistantIdRef.current = null;
       setIsConnecting(true);
       setIsFinalizing(false);
       isFinalizingRef.current = false;
@@ -264,6 +286,7 @@ export function VoiceAgentConsole() {
 
         setIsConnecting(false);
         setIsRecording(true);
+        isRecordingRef.current = true;
         startTransition(() => {
           setMode("listening");
         });
@@ -272,9 +295,18 @@ export function VoiceAgentConsole() {
       socket.onmessage = (event) => {
         const payload = JSON.parse(event.data) as StreamMessage;
 
+        // ── helpers ──────────────────────────────────────────────────────────
+        const updateMsg = (id: string, patch: Partial<ChatMessage>) => {
+          setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, ...patch } : m)));
+        };
+
         if (payload.type === "ready") {
           streamReadyRef.current = true;
-          setTranscript("Live stream connected. Start speaking.");
+          // Create the user message bubble for this recording session
+          const uid = crypto.randomUUID();
+          activeUserIdRef.current = uid;
+          activeAssistantIdRef.current = null;
+          setMessages((prev) => [...prev, { id: uid, role: "user", text: "Listening…", isStreaming: true, isError: false }]);
           if (payload.request_id) {
             setDebugInfo((current) => ({
               request_id: payload.request_id ?? current?.request_id ?? "--",
@@ -294,22 +326,65 @@ export function VoiceAgentConsole() {
 
         if (payload.type === "partial") {
           applyStreamPayload(payload);
-          startTransition(() => {
-            setMode("thinking");
-          });
+          const uid = activeUserIdRef.current;
+          if (uid && payload.text?.trim()) updateMsg(uid, { text: payload.text });
+          startTransition(() => { setMode("thinking"); });
           return;
         }
 
         if (payload.type === "final") {
           receivedFinalRef.current = true;
-          normalCloseRef.current = true;
           applyStreamPayload(payload);
           setIsFinalizing(false);
           isFinalizingRef.current = false;
-          startTransition(() => {
-            setMode("responding");
-          });
-          socket.close();
+          const uid = activeUserIdRef.current;
+          const finalText = payload.text?.trim() ?? "";
+          if (uid) updateMsg(uid, { text: finalText || "…", isStreaming: false });
+          startTransition(() => { setMode("responding"); });
+          if (!finalText) {
+            normalCloseRef.current = true;
+            socket.close();
+          }
+          return;
+        }
+
+        if (payload.type === "llm_start") {
+          const existingAid = activeAssistantIdRef.current;
+          if (existingAid) {
+            // Same session (debounced → final handoff): reset the existing bubble rather than creating a second one
+            updateMsg(existingAid, { text: "", isStreaming: true, isError: false });
+          } else {
+            const aid = crypto.randomUUID();
+            activeAssistantIdRef.current = aid;
+            setMessages((prev) => [...prev, { id: aid, role: "assistant", text: "", isStreaming: true, isError: false }]);
+          }
+          return;
+        }
+
+        if (payload.type === "llm_partial") {
+          const aid = activeAssistantIdRef.current;
+          if (aid) updateMsg(aid, { text: payload.text ?? "", isStreaming: true });
+          return;
+        }
+
+        if (payload.type === "llm_final") {
+          const aid = activeAssistantIdRef.current;
+          if (aid) updateMsg(aid, { text: payload.text ?? "", isStreaming: false });
+          if (payload.llm_ms != null) setLlmLatencyMs(payload.llm_ms);
+          if (!isRecordingRef.current) {
+            normalCloseRef.current = true;
+            socket.close();
+          }
+          return;
+        }
+
+        if (payload.type === "llm_error") {
+          const aid = activeAssistantIdRef.current;
+          if (aid) updateMsg(aid, { text: "AI unavailable — make sure Ollama is running.", isStreaming: false, isError: true });
+          if (!isRecordingRef.current) {
+            normalCloseRef.current = true;
+            socket.close();
+          }
           return;
         }
 
@@ -366,15 +441,19 @@ export function VoiceAgentConsole() {
   };
 
   const copyTranscript = useCallback(() => {
-    void navigator.clipboard.writeText(transcript).then(() => {
+    const text = messages
+      .map((m) => `${m.role === "user" ? "You" : "AI"}: ${m.text}`)
+      .join("\n\n");
+    void navigator.clipboard.writeText(text).then(() => {
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     });
-  }, [transcript]);
+  }, [messages]);
 
   const stopStreaming = () => {
     const socket = websocketRef.current;
     setIsRecording(false);
+    isRecordingRef.current = false;
     setIsFinalizing(true);
     isFinalizingRef.current = true;
     normalCloseRef.current = true;
@@ -406,19 +485,28 @@ export function VoiceAgentConsole() {
 
   const latencyCards = [
     {
-      title: "Total latency",
-      value: formatSeconds(metrics?.total_ms),
-      detail: "Per-update backend processing time for the current buffer pass.",
-    },
-    {
-      title: "Buffered audio",
-      value: formatSeconds(metrics?.buffered_audio_ms),
-      detail: "How much microphone audio has been accumulated for the current transcript window.",
-    },
-    {
-      title: "Transcribe pass",
+      title: "STT",
+      label: "Speech-to-Text",
       value: formatSeconds(metrics?.transcribe_ms),
-      detail: "Time spent in faster-whisper for the latest incremental transcription run.",
+      detail: "faster-whisper transcription time per buffer pass.",
+    },
+    {
+      title: "LLM",
+      label: "AI Response",
+      value: formatSeconds(llmLatencyMs),
+      detail: "End-to-end Ollama response time for the last completed reply.",
+    },
+    {
+      title: "TTS",
+      label: "Text-to-Speech",
+      value: "--",
+      detail: "Voice synthesis latency — coming soon.",
+    },
+    {
+      title: "E2E",
+      label: "Overall",
+      value: formatSeconds(metrics?.total_ms != null && llmLatencyMs != null ? metrics.total_ms + llmLatencyMs : (metrics?.total_ms ?? null)),
+      detail: "Combined STT + LLM pipeline time for the last session.",
     },
   ];
 
@@ -432,7 +520,6 @@ export function VoiceAgentConsole() {
           </div>
           <div className="topbar-meta">
             <span className="status-pill is-live">Live call support</span>
-            <span className="status-pill">{websocketUrl}</span>
           </div>
         </header>
 
@@ -560,17 +647,15 @@ export function VoiceAgentConsole() {
 
             <article className="surface transcript-panel">
               <div className="section-heading">
-                <p className="kicker">Conversation Transcript</p>
-                <span className="status-pill is-ghost">{error ? "Attention needed" : isRecording ? "Live capture" : "Latest capture"}</span>
-              </div>
-              <div className="transcript-stage">
-                <div className="transcript-label-row">
-                  <p className="transcript-label">Conversation text</p>
+                <p className="kicker">Conversation</p>
+                <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                  <span className="status-pill is-ghost">{error ? "Attention needed" : isRecording ? "Live" : messages.length ? "Done" : "Ready"}</span>
                   <button
                     type="button"
                     className={`copy-button${copied ? " is-copied" : ""}`}
                     onClick={copyTranscript}
-                    aria-label="Copy transcript"
+                    disabled={messages.length === 0}
+                    aria-label="Copy conversation"
                   >
                     {copied ? (
                       <>
@@ -585,8 +670,53 @@ export function VoiceAgentConsole() {
                     )}
                   </button>
                 </div>
-                <p className="transcript-line">{transcript}</p>
               </div>
+
+              <div className="chat-thread">
+                {messages.length === 0 ? (
+                  <div className="chat-empty">
+                    <p>Start a recording to begin the conversation.</p>
+                  </div>
+                ) : (
+                  messages.map((msg) => (
+                    <div key={msg.id} className={`chat-message chat-message--${msg.role}`}>
+                      <span className={`chat-avatar chat-avatar--${msg.role}`}>
+                        {msg.role === "user" ? "You" : "AI"}
+                      </span>
+                      <div
+                        className={[
+                          "chat-bubble",
+                          `chat-bubble--${msg.role}`,
+                          msg.isError ? "chat-bubble--error" : "",
+                          msg.isStreaming && msg.role === "assistant" ? "is-streaming" : "",
+                        ].filter(Boolean).join(" ")}
+                      >
+                        {msg.isError ? (
+                          <p className="chat-text chat-text--error">{msg.text}</p>
+                        ) : msg.text ? (
+                          <p className="chat-text">{msg.text}</p>
+                        ) : msg.isStreaming ? (
+                          msg.role === "assistant" ? (
+                            <div className="chat-typing-indicator" aria-label="AI is thinking">
+                              <span /><span /><span />
+                            </div>
+                          ) : (
+                            <p className="chat-text chat-text--placeholder">Listening…</p>
+                          )
+                        ) : (
+                          <p className="chat-text chat-text--placeholder">…</p>
+                        )}
+                        {/* live-capture dot on user bubble only */}
+                        {msg.isStreaming && msg.role === "user" && msg.text && (
+                          <span className="chat-typing-dot" aria-hidden="true" />
+                        )}
+                      </div>
+                    </div>
+                  ))
+                )}
+                <div ref={chatEndRef} />
+              </div>
+
               <div className="transcript-footer">
                 <span className="transcript-meta">{error ?? `Reference ID: ${debugInfo?.request_id ?? "--"}`}</span>
                 <span className="transcript-meta">Language: {debugInfo?.detected_language ?? "--"}</span>
@@ -598,8 +728,8 @@ export function VoiceAgentConsole() {
         <section className="dashboard-grid">
           <article className="surface stack-panel">
             <div className="section-heading">
-              <p className="kicker">Associate Workflow</p>
-              <span className="section-note">Built for live customer conversations</span>
+              <p className="kicker">Pipeline Steps</p>
+              <span className="section-note">Active modules in the voice agent pipeline</span>
             </div>
             <div className="stack-list">
               {orchestrationSteps.map((step) => (
@@ -616,13 +746,13 @@ export function VoiceAgentConsole() {
 
           <article className="surface insights-panel">
             <div className="section-heading">
-              <p className="kicker">Call Performance</p>
-              <span className="section-note">System timing during the current conversation</span>
+              <p className="kicker">Latency Breakdown</p>
+              <span className="section-note">Pipeline timing for the last conversation turn</span>
             </div>
             <div className="card-grid">
               {latencyCards.map((card) => (
                 <div className="info-card" key={card.title}>
-                  <span>{card.title}</span>
+                  <span className="info-card-label">{card.label}</span>
                   <strong>{card.value}</strong>
                   <p>{card.detail}</p>
                 </div>

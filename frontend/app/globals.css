@@ -571,33 +571,6 @@ button {
 
 /* ─── Transcript Panel ───────────────────────────────────── */
 
-.transcript-stage {
-  position: relative;
-  min-height: 200px;
-  padding: 20px 22px 22px;
-  border-radius: 18px;
-  background:
-    radial-gradient(ellipse 60% 50% at 10% 15%, rgba(26, 71, 200, 0.05) 0%, transparent 60%),
-    linear-gradient(170deg, rgba(239, 246, 255, 0.7) 0%, rgba(245, 243, 237, 0.5) 100%);
-  border: 1px solid rgba(26, 71, 200, 0.1);
-  box-shadow: inset 0 1px 0 rgba(255,255,255,0.8);
-}
-
-.transcript-label-row {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 14px;
-}
-
-.transcript-label {
-  color: var(--blue);
-  text-transform: uppercase;
-  letter-spacing: 0.22em;
-  font-size: 0.67rem;
-  font-weight: 700;
-}
-
 .copy-button {
   display: inline-flex;
   align-items: center;
@@ -624,14 +597,188 @@ button {
   background: var(--green-soft);
 }
 
-.transcript-line {
-  min-height: 100px;
+/* ─── Chat Thread ────────────────────────────────────────── */
+
+.chat-thread {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 8px 4px 8px;
+  min-height: 180px;
+  max-height: 440px;
+  overflow-y: auto;
+  scroll-behavior: smooth;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(0,0,0,0.10) transparent;
+}
+
+.chat-thread::-webkit-scrollbar { width: 3px; }
+.chat-thread::-webkit-scrollbar-thumb {
+  background: rgba(0,0,0,0.10);
+  border-radius: 2px;
+}
+
+.chat-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 140px;
+  color: var(--text-3);
+  font-size: 0.85rem;
+  font-style: italic;
+  text-align: center;
+}
+
+/* ── message row ── */
+
+.chat-message {
+  display: flex;
+  align-items: flex-end;   /* avatar sits at bottom of bubble */
+  gap: 10px;
+}
+
+@keyframes chat-enter {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.chat-message--user  { flex-direction: row-reverse; }
+
+/* Group consecutive same-role messages closer */
+.chat-message--user  + .chat-message--user  { margin-top: -4px; }
+.chat-message--assistant + .chat-message--assistant { margin-top: -4px; }
+
+/* ── avatar ── */
+
+.chat-avatar {
+  flex-shrink: 0;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-sans), sans-serif;
+  font-size: 0.58rem;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  /* only show avatar on FIRST message in a run */
+}
+
+.chat-avatar--user {
+  background: linear-gradient(135deg, #1A47C8 0%, #2E63E8 100%);
+  color: #fff;
+  box-shadow: 0 2px 8px rgba(26, 71, 200, 0.28);
+}
+
+.chat-avatar--assistant {
+  background: #FFF8EE;
+  color: #92400E;
+  border: 1.5px solid rgba(146, 64, 14, 0.22);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.06);
+}
+
+/* ── bubble ── */
+
+.chat-bubble {
+  max-width: 78%;
+  padding: 11px 15px 12px;
+  position: relative;
+  animation: chat-enter 250ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.chat-bubble--user {
+  background: linear-gradient(150deg, #1E4FD8 0%, #2A5CE6 100%);
+  border-radius: 18px 18px 4px 18px;
+  box-shadow: 0 2px 12px rgba(26, 71, 200, 0.25), 0 1px 3px rgba(26, 71, 200, 0.12);
+}
+
+.chat-bubble--user .chat-text { color: rgba(255, 255, 255, 0.96); }
+
+.chat-bubble--assistant {
+  background: #FEFCF8;
+  border: 1px solid rgba(146, 64, 14, 0.11);
+  border-left: 3px solid rgba(146, 64, 14, 0.4);
+  border-radius: 18px 18px 18px 4px;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.05), 0 1px 2px rgba(0, 0, 0, 0.03);
+}
+
+.chat-bubble--error {
+  border-left-color: rgba(185, 28, 28, 0.45) !important;
+  background: rgba(254, 242, 242, 0.85) !important;
+}
+
+/* Streaming pulse on the bubble border */
+.chat-bubble--assistant.is-streaming {
+  border-left-color: rgba(146, 64, 14, 0.7);
+  animation: chat-enter 250ms cubic-bezier(0.22, 1, 0.36, 1) both,
+             border-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes border-pulse {
+  0%, 100% { border-left-color: rgba(146, 64, 14, 0.4); }
+  50%       { border-left-color: rgba(146, 64, 14, 0.8); }
+}
+
+.chat-text {
   font-family: var(--font-lora), "Lora", "Georgia", serif;
-  font-size: clamp(1rem, 1.35vw, 1.18rem);
+  font-size: clamp(0.94rem, 1.18vw, 1.05rem);
   font-weight: 400;
-  line-height: 1.78;
+  line-height: 1.72;
   letter-spacing: 0.008em;
-  color: var(--text);
+  margin: 0;
+  word-break: break-word;
+}
+
+.chat-text--placeholder {
+  opacity: 0.5;
+  font-style: italic;
+}
+
+.chat-text--error {
+  color: #991b1b;
+  font-style: italic;
+  font-size: 0.88rem;
+}
+
+/* Three-dot typing indicator for assistant */
+.chat-typing-indicator {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.chat-typing-indicator span {
+  display: block;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: rgba(146, 64, 14, 0.5);
+  animation: typing-bounce 1.2s ease-in-out infinite;
+}
+
+.chat-typing-indicator span:nth-child(2) { animation-delay: 0.15s; }
+.chat-typing-indicator span:nth-child(3) { animation-delay: 0.30s; }
+
+@keyframes typing-bounce {
+  0%, 80%, 100% { transform: translateY(0); opacity: 0.4; }
+  40%            { transform: translateY(-4px); opacity: 1; }
+}
+
+/* Subtle live-capture indicator on user bubble */
+.chat-typing-dot {
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.65);
+  margin-left: 6px;
+  vertical-align: middle;
+  animation: pulse-dot 1s ease-in-out infinite;
 }
 
 .transcript-footer {
@@ -724,7 +871,17 @@ button {
 /* ─── Info Cards ─────────────────────────────────────────── */
 
 .card-grid {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.info-card-label {
+  display: block;
+  color: var(--text-3);
+  font-size: 0.76rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  margin-bottom: 6px;
 }
 
 .info-card {

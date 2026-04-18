@@ -4,6 +4,8 @@ from pathlib import Path
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.prompts.system import VOICE_AGENT_PROMPT
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
@@ -27,6 +29,12 @@ class Settings(BaseSettings):
     stream_min_audio_ms: int = 900
 
     temp_dir: Path = Path(".cache/audio")
+
+    # LLM — Ollama
+    ollama_host: str = "http://localhost:11434"
+    llm_model: str = "llama3.2"
+    llm_max_tokens: int = 150
+    llm_system_prompt: str = VOICE_AGENT_PROMPT
 
     @property
     def cors_origins(self) -> list[str]:

@@ -3,7 +3,7 @@ NPM_FRONTEND = npm --prefix frontend
 BACKEND_PORT = 8000
 FRONTEND_PORT = 3000
 
-.PHONY: setup backend-install frontend-install backend frontend dev check free-ports free-backend-port free-frontend-port
+.PHONY: setup backend-install frontend-install backend frontend dev check free-ports free-backend-port free-frontend-port ollama
 
 setup: backend-install frontend-install
 
@@ -39,7 +39,15 @@ free-frontend-port:
 
 free-ports: free-backend-port free-frontend-port
 
-dev: free-ports
+ollama:
+	@if pgrep -x ollama > /dev/null; then \
+		echo "Ollama already running"; \
+	else \
+		echo "Starting Ollama..."; \
+		ollama serve & \
+	fi
+
+dev: free-ports ollama
 	@trap 'kill 0' EXIT; $(MAKE) backend & $(MAKE) frontend & wait
 
 check:
