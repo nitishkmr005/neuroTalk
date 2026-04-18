@@ -2,6 +2,11 @@
 
 Real-time voice agent console — live speech transcription with AI-assisted responses.
 
+![NeuroTalk voice agent console](docs/images/neurotalk-console-preview.png)
+
+In the preview above, `Response Generation: 14.16 s` reflects the time the LLM spends generating the reply token by token in real time.
+Because text streaming and voice streaming are synchronized, TTS starts speaking as tokens arrive, so playback overlaps with generation instead of waiting for the full response.
+
 Designed for two contexts: **customer-facing** (direct query answering) and **associate-facing** (live call assist with database/article lookup). A voice response layer with emotional expressiveness is on the roadmap.
 
 ## Stack
