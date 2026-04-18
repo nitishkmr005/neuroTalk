@@ -940,3 +940,275 @@ Expected: all 15 tests PASSED.
 git add -A
 git commit -m "feat: Chatterbox TTS voice agent — speaking mode, barge-in, emotion tags"
 ```
+
+---
+
+## Task 11: Dark / Light theme toggle
+
+**Files:**
+- Modify: `frontend/app/globals.css` — add `[data-theme="dark"]` CSS variable overrides + dark body background
+- Modify: `frontend/components/voice-agent-console.tsx` — add toggle button + localStorage persistence
+
+### Part A — CSS
+
+- [ ] **Step 1: Add dark theme variables to `globals.css`**
+
+Append the following block at the end of `frontend/app/globals.css` (after the last `@media` block):
+
+```css
+/* ─── Dark Theme ─────────────────────────────────────────── */
+
+[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0D0F14;
+  --surface: #161A23;
+  --surface-alt: #1C2030;
+  --border: rgba(255, 255, 255, 0.08);
+  --border-subtle: rgba(255, 255, 255, 0.04);
+  --text: #F0EDE8;
+  --text-2: #9B96A0;
+  --text-3: #5C5870;
+  --blue: #6B8FFF;
+  --blue-mid: #7A9BFF;
+  --blue-soft: rgba(107, 143, 255, 0.10);
+  --blue-border: rgba(107, 143, 255, 0.20);
+  --amber: #F59E0B;
+  --amber-soft: rgba(245, 158, 11, 0.10);
+  --green: #34D399;
+  --green-soft: rgba(52, 211, 153, 0.10);
+  --red: #F87171;
+  --red-soft: rgba(248, 113, 113, 0.10);
+  --shadow-sm: 0 1px 3px rgba(0,0,0,0.4), 0 1px 2px rgba(0,0,0,0.3);
+  --shadow: 0 4px 20px rgba(0,0,0,0.5), 0 1px 4px rgba(0,0,0,0.3);
+  --shadow-lg: 0 16px 56px rgba(0,0,0,0.6), 0 4px 16px rgba(0,0,0,0.4);
+}
+
+[data-theme="dark"] body {
+  background:
+    radial-gradient(ellipse 60% 40% at 8% 10%, rgba(107, 143, 255, 0.07) 0%, transparent 70%),
+    radial-gradient(ellipse 50% 35% at 92% 6%, rgba(245, 158, 11, 0.05) 0%, transparent 65%),
+    radial-gradient(ellipse 45% 30% at 75% 88%, rgba(52, 211, 153, 0.04) 0%, transparent 60%),
+    linear-gradient(160deg, #0A0C11 0%, #0D1018 50%, #0B0D14 100%);
+}
+
+[data-theme="dark"] body::before {
+  background-image: radial-gradient(circle, rgba(255, 255, 255, 0.018) 1px, transparent 1px);
+}
+
+[data-theme="dark"] .surface::after {
+  background: linear-gradient(160deg, rgba(255,255,255,0.04) 0%, transparent 38%);
+}
+
+[data-theme="dark"] .chat-bubble--assistant {
+  background: #1C2030;
+  border-color: rgba(245, 158, 11, 0.15);
+  border-left-color: rgba(245, 158, 11, 0.45);
+}
+
+[data-theme="dark"] .chat-bubble--user {
+  background: linear-gradient(150deg, #2A4FCC 0%, #3560DD 100%);
+}
+
+[data-theme="dark"] .chat-avatar--assistant {
+  background: #2A2318;
+  color: #F59E0B;
+  border-color: rgba(245, 158, 11, 0.25);
+}
+
+[data-theme="dark"] .status-pill {
+  background: rgba(255,255,255,0.04);
+}
+
+[data-theme="dark"] .status-pill.is-live {
+  background: rgba(52, 211, 153, 0.08);
+  border-color: rgba(52, 211, 153, 0.25);
+}
+
+[data-theme="dark"] .telemetry-meter-track {
+  background: rgba(255,255,255,0.07);
+}
+
+/* Theme toggle button */
+.theme-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-2);
+  font-size: 0.78rem;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  cursor: pointer;
+  transition: border-color 160ms ease, background 160ms ease, color 160ms ease;
+}
+
+.theme-toggle:hover {
+  border-color: var(--blue-border);
+  background: var(--blue-soft);
+  color: var(--blue);
+}
+```
+
+### Part B — Toggle component logic
+
+- [ ] **Step 2: Add theme state and effect to `VoiceAgentConsole`**
+
+In `voice-agent-console.tsx`, add `"useEffect"` is already imported. Add a new state and effect for theme. After the existing state declarations (near the top of `VoiceAgentConsole`), add:
+
+```typescript
+const [isDark, setIsDark] = useState(false);
+
+useEffect(() => {
+  const saved = localStorage.getItem("nt-theme");
+  if (saved === "dark") {
+    document.documentElement.setAttribute("data-theme", "dark");
+    setIsDark(true);
+  }
+}, []);
+
+const toggleTheme = () => {
+  const next = !isDark;
+  setIsDark(next);
+  if (next) {
+    document.documentElement.setAttribute("data-theme", "dark");
+    localStorage.setItem("nt-theme", "dark");
+  } else {
+    document.documentElement.removeAttribute("data-theme");
+    localStorage.setItem("nt-theme", "light");
+  }
+};
+```
+
+- [ ] **Step 3: Add toggle button to topbar**
+
+In the JSX, find the `topbar-meta` div:
+```tsx
+<div className="topbar-meta">
+  <span className="status-pill is-live">Live call support</span>
+</div>
+```
+Replace with:
+```tsx
+<div className="topbar-meta">
+  <button type="button" className="theme-toggle" onClick={toggleTheme} aria-label="Toggle theme">
+    {isDark ? (
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
+      </svg>
+    ) : (
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+      </svg>
+    )}
+    {isDark ? "Light" : "Dark"}
+  </button>
+  <span className="status-pill is-live">Live call support</span>
+</div>
+```
+
+- [ ] **Step 4: Verify TypeScript compiles**
+
+```bash
+npm --prefix frontend run typecheck
+```
+
+Expected: no type errors.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add frontend/app/globals.css frontend/components/voice-agent-console.tsx
+git commit -m "feat(frontend): add dark/light theme toggle with localStorage persistence"
+```
+
+---
+
+## Task 12: Better title, tagline, and design polish
+
+**Files:**
+- Modify: `frontend/components/voice-agent-console.tsx` — update title, kicker, add tagline
+- Modify: `frontend/app/layout.tsx` — update page metadata title/description
+- Modify: `frontend/app/globals.css` — add tagline style + topbar refinements
+
+- [ ] **Step 1: Update page metadata in `layout.tsx`**
+
+Replace:
+```typescript
+export const metadata: Metadata = {
+  title: "NeuroTalk Voice Console",
+  description: "Prototype UI for an advanced voice agent control surface.",
+};
+```
+With:
+```typescript
+export const metadata: Metadata = {
+  title: "NeuroTalk — Voice Intelligence Platform",
+  description: "Real-time speech understanding with AI that thinks and speaks back. Live transcription, LLM reasoning, and expressive voice synthesis in one continuous loop.",
+};
+```
+
+- [ ] **Step 2: Update topbar copy in `voice-agent-console.tsx`**
+
+Find the topbar header JSX:
+```tsx
+<header className="topbar surface">
+  <div>
+    <p className="kicker">NeuroTalk / Voice Agent Console</p>
+    <h1>Real-Time Conversation Control Center.</h1>
+  </div>
+```
+Replace with:
+```tsx
+<header className="topbar surface">
+  <div>
+    <p className="kicker">NeuroTalk — Voice Intelligence Platform</p>
+    <h1>The AI That Listens and Speaks Back.</h1>
+    <p className="topbar-tagline">Live transcription · AI reasoning · Expressive voice synthesis</p>
+  </div>
+```
+
+- [ ] **Step 3: Add `.topbar-tagline` style to `globals.css`**
+
+Inside the `/* ─── Topbar ─── */` section, after the `.kicker` rule block, add:
+
+```css
+.topbar-tagline {
+  margin-top: 10px;
+  color: var(--text-3);
+  font-size: 0.88rem;
+  font-weight: 400;
+  letter-spacing: 0.01em;
+  line-height: 1.5;
+}
+```
+
+- [ ] **Step 4: Improve the orchestration step for Response Generation**
+
+In `voice-agent-console.tsx`, find `orchestrationSteps`. Update the Response Generation entry to reference the current model name:
+
+Find:
+```typescript
+{ label: "Response Generation", detail: "Ollama (llama3.2) responds to the transcript as speech is detected.", status: "online" },
+```
+Replace with:
+```typescript
+{ label: "Response Generation", detail: "Ollama (Gemma 4) reasons over the transcript and streams a reply with expressive emotion cues.", status: "online" },
+```
+
+- [ ] **Step 5: Verify TypeScript compiles**
+
+```bash
+npm --prefix frontend run typecheck
+```
+
+Expected: no type errors.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add frontend/components/voice-agent-console.tsx frontend/app/layout.tsx frontend/app/globals.css
+git commit -m "feat(frontend): better title, tagline, and orchestration step copy"
+```
