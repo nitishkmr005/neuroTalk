@@ -61,7 +61,7 @@ const modeConfig: Record<
   },
   responding: {
     eyebrow: "Final transcript returned",
-    headline: "Inspect the completed text and timing breakdown.",
+    headline: "Review the transcript, signal, and runtime trace.",
     summary:
       "When you stop the microphone, the backend performs one final pass and returns the latest transcript, request id, and timing values for debugging.",
     accent: "voice-delivery",
@@ -84,6 +84,7 @@ const runtimeNotes = [
 const waveformHeights = [28, 46, 32, 64, 24, 58, 38, 72, 44, 30, 66, 35, 54, 26, 60, 40];
 const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8000";
 const websocketUrl = `${backendUrl.replace(/^http/, "ws")}/ws/transcribe`;
+const initialWaveLevels = waveformHeights.map(() => 0.18);
 
 function float32ToInt16(input: Float32Array): Int16Array {
   const output = new Int16Array(input.length);
@@ -125,6 +126,7 @@ export function VoiceAgentConsole() {
   const [metrics, setMetrics] = useState<Metrics | null>(null);
   const [debugInfo, setDebugInfo] = useState<DebugInfo | null>(null);
   const [amplitude, setAmplitude] = useState(0.08);
+  const [waveLevels, setWaveLevels] = useState(initialWaveLevels);
 
   const websocketRef = useRef<WebSocket | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
@@ -139,6 +141,7 @@ export function VoiceAgentConsole() {
   const normalCloseRef = useRef(false);
   const errorRef = useRef<string | null>(null);
   const amplitudeRef = useRef(0.08);
+  const waveLevelsRef = useRef(initialWaveLevels);
 
   useEffect(() => {
     errorRef.current = error;
@@ -153,6 +156,8 @@ export function VoiceAgentConsole() {
     gainNodeRef.current = null;
     amplitudeRef.current = 0.08;
     setAmplitude(0.08);
+    waveLevelsRef.current = initialWaveLevels;
+    setWaveLevels(initialWaveLevels);
 
     mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
     mediaStreamRef.current = null;
@@ -242,10 +247,14 @@ export function VoiceAgentConsole() {
 
           const channelData = event.inputBuffer.getChannelData(0);
           const rms = getRmsAmplitude(channelData);
-          const nextAmplitude = Math.min(1, Math.max(0.05, rms * 5.2));
-          const smoothedAmplitude = amplitudeRef.current * 0.72 + nextAmplitude * 0.28;
+          const nextAmplitude = Math.min(1, Math.max(0.04, rms * 11.5));
+          const smoothedAmplitude = amplitudeRef.current * 0.58 + nextAmplitude * 0.42;
           amplitudeRef.current = smoothedAmplitude;
           setAmplitude(smoothedAmplitude);
+
+          const nextBars = [...waveLevelsRef.current.slice(1), smoothedAmplitude];
+          waveLevelsRef.current = nextBars;
+          setWaveLevels(nextBars);
 
           const pcm16 = float32ToInt16(channelData);
           socket.send(pcm16.buffer);
@@ -384,9 +393,14 @@ export function VoiceAgentConsole() {
   const activeMode = modeConfig[mode];
   const controlLabel = isRecording ? "Stop Streaming" : isConnecting ? "Connecting..." : "Start Live Transcription";
   const controlDisabled = isConnecting || isFinalizing;
-  const orbScale = (1 + amplitude * 0.28).toFixed(3);
-  const orbGlow = (0.35 + amplitude * 0.85).toFixed(3);
-  const orbTilt = `${(amplitude * 14).toFixed(2)}deg`;
+  const orbScale = (1 + amplitude * 0.42).toFixed(3);
+  const orbGlow = (0.45 + amplitude * 1.3).toFixed(3);
+  const orbTilt = `${(amplitude * 18).toFixed(2)}deg`;
+  const orbCoreScale = (1 + amplitude * 0.34).toFixed(3);
+  const orbDriftX = `${(amplitude * 12).toFixed(2)}px`;
+  const orbDriftY = `${(amplitude * -10).toFixed(2)}px`;
+  const signalDescriptor =
+    amplitude > 0.58 ? "High energy" : amplitude > 0.28 ? "Active voice" : isRecording ? "Low input" : "Idle";
 
   const latencyCards = [
     {
@@ -412,7 +426,7 @@ export function VoiceAgentConsole() {
         <header className="topbar surface">
           <div>
             <p className="kicker">NeuroTalk / Sovereign Voice Agent</p>
-            <h1>Control surface for an intelligence-first voice interface.</h1>
+            <h1>Realtime Voice Intelligence Console.</h1>
           </div>
           <div className="topbar-meta">
             <span className="status-pill is-live">Realtime STT stream</span>
@@ -437,6 +451,9 @@ export function VoiceAgentConsole() {
                     "--orb-scale": orbScale,
                     "--orb-glow": orbGlow,
                     "--orb-tilt": orbTilt,
+                    "--orb-core-scale": orbCoreScale,
+                    "--orb-drift-x": orbDriftX,
+                    "--orb-drift-y": orbDriftY,
                   } as CSSProperties
                 }
               >
@@ -448,24 +465,18 @@ export function VoiceAgentConsole() {
 
               <div className="wave-grid" aria-hidden="true">
                 {waveformHeights.map((height, index) => (
-                  (() => {
-                    const amplitudeBoost = amplitude * (12 + (index % 4) * 7);
-                    const reactiveHeight = height + amplitudeBoost;
-                    const reactiveOpacity = 0.45 + amplitude * 0.55;
-                    return (
-                      <span
-                        className="wave-bar"
-                        key={`${height}-${index}`}
-                        style={
-                          {
-                            "--bar-height": `${reactiveHeight}px`,
-                            "--bar-delay": `${index * 0.08}s`,
-                            "--bar-opacity": reactiveOpacity.toFixed(3),
-                          } as CSSProperties
-                        }
-                      />
-                    );
-                  })()
+                  <span
+                    className="wave-bar"
+                    key={`${height}-${index}`}
+                    style={
+                      {
+                        "--bar-height": `${18 + waveLevels[index] * 70}px`,
+                        "--bar-delay": `${index * 0.03}s`,
+                        "--bar-opacity": (0.3 + waveLevels[index] * 0.7).toFixed(3),
+                        "--bar-scale": (0.82 + waveLevels[index] * 0.48).toFixed(3),
+                      } as CSSProperties
+                    }
+                  />
                 ))}
               </div>
             </div>
@@ -508,7 +519,7 @@ export function VoiceAgentConsole() {
           <aside className="telemetry-stack">
             <article className="surface telemetry-panel">
               <div className="section-heading">
-                <p className="kicker">Session telemetry</p>
+                <p className="kicker">Live Signal Diagnostics</p>
                 <span className="mini-dot" />
               </div>
               <div className="metric-grid">
@@ -529,6 +540,20 @@ export function VoiceAgentConsole() {
                   <strong>{formatSeconds(metrics?.client_roundtrip_ms)}</strong>
                 </div>
               </div>
+              <div className="telemetry-stage">
+                <div className="telemetry-meter">
+                  <div className="telemetry-meter-header">
+                    <span>Input energy</span>
+                    <strong>{signalDescriptor}</strong>
+                  </div>
+                  <div className="telemetry-meter-track">
+                    <span
+                      className="telemetry-meter-fill"
+                      style={{ "--meter-fill": `${Math.max(8, amplitude * 100)}%` } as CSSProperties}
+                    />
+                  </div>
+                </div>
+              </div>
             </article>
 
             <article className="surface transcript-panel">
@@ -536,10 +561,13 @@ export function VoiceAgentConsole() {
                 <p className="kicker">Transcribed text</p>
                 <span className="status-pill is-ghost">{error ? "Error state" : isRecording ? "Live partials" : "Latest result"}</span>
               </div>
-              <p className="transcript-line">{transcript}</p>
+              <div className="transcript-stage">
+                <p className="transcript-label">Live transcript</p>
+                <p className="transcript-line">{transcript}</p>
+              </div>
               <div className="transcript-footer">
-                <span>{error ?? `Request ID: ${debugInfo?.request_id ?? "--"}`}</span>
-                <span>Language: {debugInfo?.detected_language ?? "--"}</span>
+                <span className="transcript-meta">{error ?? `Request ID: ${debugInfo?.request_id ?? "--"}`}</span>
+                <span className="transcript-meta">Language: {debugInfo?.detected_language ?? "--"}</span>
               </div>
             </article>
           </aside>
