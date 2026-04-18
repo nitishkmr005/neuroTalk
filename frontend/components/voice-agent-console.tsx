@@ -1,6 +1,6 @@
 "use client";
 
-import { startTransition, useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
+import { Fragment, startTransition, useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 
 type Mode = "listening" | "thinking" | "responding" | "speaking";
 
@@ -58,41 +58,34 @@ const modeConfig: Record<
   }
 > = {
   listening: {
-    eyebrow: "Live conversation active",
-    headline: "Capturing the caller in real time.",
+    eyebrow: "Listening",
+    headline: "I'm listening. Speak naturally.",
     summary:
-      "The assistant is capturing the call in real time so associates can follow the conversation without losing context.",
+      "Ask me anything — I'll respond as soon as I understand. You can interrupt my reply at any point by speaking.",
     accent: "active-listening",
   },
   thinking: {
-    eyebrow: "Live transcript updating",
-    headline: "Refreshing the conversation as speech arrives.",
+    eyebrow: "Processing your speech",
+    headline: "Catching your words in real time.",
     summary:
-      "The transcript is being updated continuously to help associates track customer intent, details, and phrasing.",
+      "Your speech is being transcribed as you talk. The AI will begin composing a reply once it understands your intent.",
     accent: "deep-reasoning",
   },
   responding: {
-    eyebrow: "Assistant reply in progress",
-    headline: "Streaming the next response back to the agent.",
+    eyebrow: "Composing a reply",
+    headline: "Thinking of what to say.",
     summary:
-      "The assistant is turning the latest transcript into a live reply so associates can react without waiting for the session to end.",
+      "The AI is crafting a response to what you said. It will speak the reply aloud in just a moment.",
     accent: "voice-delivery",
   },
   speaking: {
-    eyebrow: "AI voice active",
-    headline: "Speaking the reply aloud.",
+    eyebrow: "AI speaking",
+    headline: "Hear the reply.",
     summary:
-      "Chatterbox Turbo is synthesising the AI reply into speech. Speak at any time to interrupt and take your turn.",
+      "The AI is speaking its reply. Interrupt at any time by speaking — it will stop and listen immediately.",
     accent: "voice-delivery",
   },
 };
-
-const orchestrationSteps = [
-  { label: "Live Audio Capture", detail: "PCM audio streamed in real-time over WebSocket to the backend.", status: "online" },
-  { label: "Incremental Transcription", detail: "faster-whisper transcribes audio incrementally with VAD filtering.", status: "online" },
-  { label: "Response Generation", detail: "Ollama (llama3.2) responds to the transcript as speech is detected.", status: "online" },
-  { label: "Voice Playback", detail: "Chatterbox Turbo synthesises AI replies and streams audio to the browser.", status: "online" },
-];
 
 const waveformHeights = [28, 46, 32, 64, 24, 58, 38, 72, 44, 30, 66, 35, 54, 26, 60, 40];
 const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8000";
@@ -258,6 +251,8 @@ export function VoiceAgentConsole() {
       isFinalizingRef.current = false;
       receivedFinalRef.current = false;
       normalCloseRef.current = false;
+      interruptSentRef.current = false;
+      bargeinFrameCountRef.current = 0;
 
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
@@ -649,15 +644,27 @@ export function VoiceAgentConsole() {
         <section className="hero-grid">
           <article className="hero-panel surface">
             <div className="hero-copy">
-              <span className={`mode-chip ${activeMode.accent}`}>{activeMode.eyebrow}</span>
+              <span className={`mode-chip ${activeMode.accent}`}>
+                {(mode === "listening" || mode === "speaking") && (
+                  <span className="mode-chip-dot" aria-hidden="true" />
+                )}
+                {activeMode.eyebrow}
+              </span>
               <h2>{activeMode.headline}</h2>
-              <p>{activeMode.summary}</p>
+              <p className="hero-summary">{activeMode.summary}</p>
             </div>
 
             <div className="hero-visual">
-              <div
-                className="orbital-core"
-                aria-hidden="true"
+              <button
+                type="button"
+                className={[
+                  "orbital-core",
+                  isRecording ? "orbital-core--recording" : "",
+                  isConnecting ? "orbital-core--connecting" : "",
+                ].filter(Boolean).join(" ")}
+                disabled={controlDisabled}
+                onClick={isRecording ? stopStreaming : () => void startStreaming()}
+                aria-label={controlLabel}
                 style={
                   {
                     "--orb-scale": orbScale,
@@ -673,7 +680,7 @@ export function VoiceAgentConsole() {
                 <div className="orb-ring orb-ring-2" />
                 <div className="orb-center" />
                 <div className="orb-scanline" />
-              </div>
+              </button>
 
               <div className="wave-grid" aria-hidden="true">
                 {waveformHeights.map((height, index) => (
@@ -691,39 +698,34 @@ export function VoiceAgentConsole() {
                   />
                 ))}
               </div>
-            </div>
 
-            <div className="controls-row">
-              <button
-                type="button"
-                className={isRecording ? "control-button is-recording" : "control-button"}
-                disabled={controlDisabled}
-                onClick={isRecording ? stopStreaming : () => void startStreaming()}
-              >
-                {controlLabel}
-              </button>
-              <div className="control-hints">
-                <span>
-                  {isRecording
-                    ? "The conversation is being captured live"
-                    : isFinalizing
-                      ? "Finalizing the latest conversation transcript"
-                      : "Ready to start a live conversation capture"}
-                </span>
-                <span className={error ? "is-error" : ""}>{error ?? "Transcript updates will appear during the conversation"}</span>
-              </div>
+              <p className={`orb-tap-hint${isRecording ? " is-active" : isFinalizing ? " is-muted" : ""}`}>
+                {error
+                  ? <span className="is-error">{error}</span>
+                  : isFinalizing
+                    ? "Processing…"
+                    : isRecording
+                      ? "Tap to stop"
+                      : "Tap to speak"}
+              </p>
             </div>
 
             <div className="mode-switcher">
-              {(["listening", "thinking", "responding"] as Mode[]).map((item) => (
-                <button
-                  type="button"
-                  key={item}
-                  className={item === mode ? "mode-button is-selected" : "mode-button is-static"}
-                  disabled
-                >
-                  {item}
-                </button>
+              {(["listening", "thinking", "responding"] as Mode[]).map((item, index) => (
+                <Fragment key={item}>
+                  {index > 0 && (
+                    <span className={`mode-step-line${
+                      ["listening", "thinking", "responding"].indexOf(mode) >= index ? " is-active" : ""
+                    }`} />
+                  )}
+                  <button
+                    type="button"
+                    className={item === mode ? "mode-button is-selected" : "mode-button is-static"}
+                    disabled
+                  >
+                    {item}
+                  </button>
+                </Fragment>
               ))}
             </div>
           </article>
@@ -735,22 +737,12 @@ export function VoiceAgentConsole() {
                 <span className="mini-dot" />
               </div>
               <div className="metric-grid">
-                <div>
-                  <span>Processing time</span>
-                  <strong>{formatSeconds(metrics?.total_ms)}</strong>
-                </div>
-                <div>
-                  <span>Model status</span>
-                  <strong>{formatSeconds(metrics?.model_load_ms, { cachedWhenZero: true })}</strong>
-                </div>
-                <div>
-                  <span>Transcript refresh</span>
-                  <strong>{formatSeconds(metrics?.transcribe_ms)}</strong>
-                </div>
-                <div>
-                  <span>Session duration</span>
-                  <strong>{formatSeconds(metrics?.client_roundtrip_ms)}</strong>
-                </div>
+                {latencyCards.map((card) => (
+                  <div key={card.title}>
+                    <span>{card.label}</span>
+                    <strong>{card.value}</strong>
+                  </div>
+                ))}
               </div>
               <div className="telemetry-stage">
                 <div className="telemetry-meter">
@@ -848,42 +840,27 @@ export function VoiceAgentConsole() {
           </aside>
         </section>
 
-        <section className="dashboard-grid">
-          <article className="surface stack-panel">
-            <div className="section-heading">
-              <p className="kicker">Voice Pipeline Status</p>
-              <span className="section-note">Active stages driving the live agent loop</span>
-            </div>
-            <div className="stack-list">
-              {orchestrationSteps.map((step) => (
-                <div className="stack-item" key={step.label}>
-                  <div>
-                    <h3>{step.label}</h3>
-                    <p>{step.detail}</p>
-                  </div>
-                  <span className={`status-tag status-${step.status}`}>{step.status}</span>
-                </div>
-              ))}
-            </div>
-          </article>
-
-          <article className="surface insights-panel">
-            <div className="section-heading">
-              <p className="kicker">Turn Timing Breakdown</p>
-              <span className="section-note">Latency across the latest live interaction</span>
-            </div>
-            <div className="card-grid">
-              {latencyCards.map((card) => (
-                <div className="info-card" key={card.title}>
-                  <span className="info-card-label">{card.label}</span>
-                  <strong>{card.value}</strong>
-                  <p>{card.detail}</p>
-                </div>
-              ))}
-            </div>
-          </article>
-        </section>
       </section>
+
+      <footer className="console-footer">
+        <div className="console-footer-inner">
+          <span className="console-footer-brand">NeuroTalk</span>
+          <span className="console-footer-sep" aria-hidden="true">·</span>
+          <span className="console-footer-tagline">Local voice AI · STT · LLM · TTS</span>
+          <span className="console-footer-sep" aria-hidden="true">·</span>
+          <a
+            className="console-footer-link"
+            href="https://github.com/nitishkmr005/neuroTalk"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" style={{ display: "inline", verticalAlign: "middle", marginRight: 5 }}>
+              <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0 0 24 12c0-6.63-5.37-12-12-12z"/>
+            </svg>
+            GitHub
+          </a>
+        </div>
+      </footer>
     </main>
   );
 }
