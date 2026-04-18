@@ -51,6 +51,10 @@ omnivoice_model = [
   "torchaudio==2.6.0; python_version < '3.14'",
   "torchaudio>=2.9.0; python_version >= '3.14'",
 ]
+dev = [
+  "pytest>=8.0.0",
+  "pytest-asyncio>=0.23.0",
+]
 
 [tool.uv]
 package = false
@@ -84,3 +88,7 @@ conflicts = [
 [tool.uv.sources]
 chatterbox-tts = { git = "https://github.com/resemble-ai/chatterbox", branch = "master" }
 vibevoice = { git = "https://github.com/microsoft/VibeVoice", branch = "main" }
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
