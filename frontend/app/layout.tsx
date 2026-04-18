@@ -7,8 +7,8 @@ const lora = Lora({ subsets: ["latin"], variable: "--font-lora" });
 const figtree = Figtree({ subsets: ["latin"], variable: "--font-sans" });
 
 export const metadata: Metadata = {
-  title: "NeuroTalk Voice Console",
-  description: "Prototype UI for an advanced voice agent control surface.",
+  title: "NeuroTalk — Voice Intelligence Platform",
+  description: "Live transcription, AI reasoning, and expressive voice synthesis.",
 };
 
 export default function RootLayout({

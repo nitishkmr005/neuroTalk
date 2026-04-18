@@ -599,8 +599,9 @@ export function VoiceAgentConsole() {
       <section className="console-frame">
         <header className="topbar surface">
           <div>
-            <p className="kicker">NeuroTalk / Voice Agent Console</p>
-            <h1>Real-Time Conversation Control Center.</h1>
+            <p className="kicker">Voice Intelligence Platform</p>
+            <h1>NeuroTalk</h1>
+            <p className="topbar-tagline">Live transcription · AI reasoning · Expressive voice synthesis</p>
           </div>
           <div className="topbar-meta">
             <span className="status-pill is-live">Live call support</span>

@@ -230,6 +230,14 @@ button {
   font-weight: 700;
 }
 
+.topbar-tagline {
+  font-size: 0.72rem;
+  color: var(--text-3);
+  letter-spacing: 0.02em;
+  margin: 0;
+  line-height: 1.4;
+}
+
 /* ─── Status Pills ───────────────────────────────────────── */
 
 .status-pill {
