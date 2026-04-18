@@ -194,6 +194,7 @@ async def transcribe_stream(websocket: WebSocket) -> None:
     pending_llm_call: tuple[str, str] | None = None
     latest_llm_input = ""
     interrupt_event = asyncio.Event()
+    silence_debounce_task: asyncio.Task[None] | None = None
 
     # ── Session log scaffolding ───────────────────────────────────────────────
     session_log = SessionLog(
@@ -349,11 +350,27 @@ async def transcribe_stream(websocket: WebSocket) -> None:
             logger.info("request_id={} event=pause_command_detected text={}", request_id, normalized_text)
             return
 
+        # If an LLM is already running for older text, cancel it — the user kept talking
+        # and we have a more complete utterance now. Avoids "two replies for one query".
+        if llm_task is not None and not llm_task.done():
+            logger.info("request_id={} event=llm_cancel_for_newer_text", request_id)
+            interrupt_event.set()
+            pending_llm_call = None
+            llm_task.cancel()
+            llm_task = None
+
         pending_llm_call = (normalized_text, trigger)
         if llm_task is None or llm_task.done():
             next_text, next_trigger = pending_llm_call
             pending_llm_call = None
             llm_task = asyncio.create_task(run_llm_stream(next_text, next_trigger))
+
+    async def _silence_debounce_then_fire(text: str, trigger: str) -> None:
+        try:
+            await asyncio.sleep(settings.stream_llm_silence_ms / 1000)
+        except asyncio.CancelledError:
+            return
+        schedule_llm_stream(text, trigger)
 
     async def run_welcome() -> None:
         welcome = settings.welcome_message
@@ -392,6 +409,11 @@ async def transcribe_stream(websocket: WebSocket) -> None:
                     logger.info("request_id={} event=interrupt_received", request_id)
                     interrupt_event.set()
                     pending_llm_call = None
+                    if silence_debounce_task is not None and not silence_debounce_task.done():
+                        silence_debounce_task.cancel()
+                        with suppress(asyncio.CancelledError):
+                            await silence_debounce_task
+                        silence_debounce_task = None
                     if llm_task is not None and not llm_task.done():
                         llm_task.cancel()
                         with suppress(asyncio.CancelledError):
@@ -400,6 +422,13 @@ async def transcribe_stream(websocket: WebSocket) -> None:
                     continue
 
                 if event_type == "stop":
+                    # Cancel pending silence-debounce so it doesn't double-fire after the
+                    # final transcript triggers its own LLM call.
+                    if silence_debounce_task is not None and not silence_debounce_task.done():
+                        silence_debounce_task.cancel()
+                        with suppress(asyncio.CancelledError):
+                            await silence_debounce_task
+                        silence_debounce_task = None
                     if sample_rate and pcm_buffer:
                         audio_duration_ms = round(len(pcm_buffer) / 2 / sample_rate * 1000, 2)
                         audio_file_path = str(settings.temp_dir / f"{request_id}_stream.wav")
@@ -514,7 +543,13 @@ async def transcribe_stream(websocket: WebSocket) -> None:
                         segments=debug.get("segments", 0),
                     )
                 )
-                schedule_llm_stream(current_text, "debounced_partial")
+                # Debounce: only fire LLM once partial text has been stable for
+                # `stream_llm_silence_ms` (i.e. user paused). Reset timer on every new partial.
+                if silence_debounce_task is not None and not silence_debounce_task.done():
+                    silence_debounce_task.cancel()
+                silence_debounce_task = asyncio.create_task(
+                    _silence_debounce_then_fire(current_text, "debounced_partial")
+                )
 
             last_emit_at = perf_counter()
 
@@ -525,6 +560,10 @@ async def transcribe_stream(websocket: WebSocket) -> None:
         logger.exception("request_id={} event=ws_failed error={}", request_id, error)
         await send_json({"type": "error", "message": "Streaming transcription failed."})
     finally:
+        if silence_debounce_task is not None and not silence_debounce_task.done():
+            silence_debounce_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await silence_debounce_task
         if llm_task is not None and not llm_task.done():
             llm_task.cancel()
             with suppress(asyncio.CancelledError):

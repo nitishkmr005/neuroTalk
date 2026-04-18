@@ -145,6 +145,8 @@ export function VoiceAgentConsole() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const activeUserIdRef = useRef<string | null>(null);
   const activeAssistantIdRef = useRef<string | null>(null);
+  const pendingAssistantTextRef = useRef<string>("");
+  const revealRafRef = useRef<number | null>(null);
   const chatEndRef = useRef<HTMLDivElement | null>(null);
 
   const websocketRef = useRef<WebSocket | null>(null);
@@ -195,6 +197,10 @@ export function VoiceAgentConsole() {
     gainNodeRef.current = null;
     ttsSourceRef.current?.stop();
     ttsSourceRef.current = null;
+    if (revealRafRef.current !== null) {
+      cancelAnimationFrame(revealRafRef.current);
+      revealRafRef.current = null;
+    }
     amplitudeRef.current = 0.08;
     setAmplitude(0.08);
     waveLevelsRef.current = initialWaveLevels;
@@ -310,6 +316,10 @@ export function VoiceAgentConsole() {
                 interruptSentRef.current = true;
                 ttsSourceRef.current.stop();
                 ttsSourceRef.current = null;
+                if (revealRafRef.current !== null) {
+                  cancelAnimationFrame(revealRafRef.current);
+                  revealRafRef.current = null;
+                }
                 if (socket.readyState === WebSocket.OPEN) {
                   socket.send(JSON.stringify({ type: "interrupt" }));
                 }
@@ -410,6 +420,12 @@ export function VoiceAgentConsole() {
           }
           // Null ref so the next partial creates a fresh user bubble for the next turn
           activeUserIdRef.current = null;
+          // Reset the buffered text — bubble will stay on typing indicator until TTS plays
+          pendingAssistantTextRef.current = "";
+          if (revealRafRef.current !== null) {
+            cancelAnimationFrame(revealRafRef.current);
+            revealRafRef.current = null;
+          }
           const aid = crypto.randomUUID();
           activeAssistantIdRef.current = aid;
           setMessages((prev) => [...prev, { id: aid, role: "assistant", text: "", isStreaming: true, isError: false }]);
@@ -417,15 +433,15 @@ export function VoiceAgentConsole() {
         }
 
         if (payload.type === "llm_partial") {
-          const aid = activeAssistantIdRef.current;
-          if (aid) updateMsg(aid, { text: payload.text ?? "", isStreaming: true });
+          // Buffer the text but DON'T render yet — we want the visible text to advance
+          // in lockstep with TTS audio playback, not race ahead of it.
+          pendingAssistantTextRef.current = payload.text ?? "";
           startTransition(() => { setMode("responding"); });
           return;
         }
 
         if (payload.type === "llm_final") {
-          const aid = activeAssistantIdRef.current;
-          if (aid) updateMsg(aid, { text: payload.text ?? "", isStreaming: false });
+          pendingAssistantTextRef.current = payload.text ?? "";
           if (payload.llm_ms != null) setLlmLatencyMs(payload.llm_ms);
           startTransition(() => { setMode(isRecordingRef.current ? "listening" : "responding"); });
           return;
@@ -453,6 +469,7 @@ export function VoiceAgentConsole() {
           for (let i = 0; i < binaryString.length; i++) bytes[i] = binaryString.charCodeAt(i);
           const audioCtx = audioContextRef.current ?? new AudioContext();
           if (!audioContextRef.current) audioContextRef.current = audioCtx;
+          const aid = activeAssistantIdRef.current;
           void audioCtx.decodeAudioData(bytes.buffer.slice(0), (buffer) => {
             const source = audioCtx.createBufferSource();
             source.buffer = buffer;
@@ -460,13 +477,59 @@ export function VoiceAgentConsole() {
             ttsSourceRef.current = source;
             interruptSentRef.current = false;
             bargeinFrameCountRef.current = 0;
-            source.onended = () => { ttsSourceRef.current = null; };
+
+            // Progressive reveal: walk pendingAssistantTextRef onto the bubble at a
+            // rate proportional to the audio duration, so the text appears in step
+            // with the spoken voice.
+            const fullText = pendingAssistantTextRef.current;
+            const durationMs = Math.max(200, buffer.duration * 1000);
+            const startTime = performance.now();
+            if (revealRafRef.current !== null) {
+              cancelAnimationFrame(revealRafRef.current);
+              revealRafRef.current = null;
+            }
+            const tick = () => {
+              if (!aid || ttsSourceRef.current !== source) {
+                revealRafRef.current = null;
+                return;
+              }
+              const elapsed = performance.now() - startTime;
+              const progress = Math.min(1, elapsed / durationMs);
+              const revealedChars = Math.floor(progress * fullText.length);
+              const visible = fullText.slice(0, revealedChars);
+              updateMsg(aid, { text: visible, isStreaming: progress < 1 });
+              if (progress < 1) {
+                revealRafRef.current = requestAnimationFrame(tick);
+              } else {
+                revealRafRef.current = null;
+              }
+            };
+            if (aid && fullText) {
+              revealRafRef.current = requestAnimationFrame(tick);
+            }
+
+            source.onended = () => {
+              ttsSourceRef.current = null;
+              if (revealRafRef.current !== null) {
+                cancelAnimationFrame(revealRafRef.current);
+                revealRafRef.current = null;
+              }
+              // Snap to full text once playback finishes — protects against rounding drift.
+              if (aid && pendingAssistantTextRef.current) {
+                updateMsg(aid, { text: pendingAssistantTextRef.current, isStreaming: false });
+              }
+            };
             void audioCtx.resume().then(() => { source.start(); });
           });
           return;
         }
 
         if (payload.type === "tts_done") {
+          // Fallback: if TTS produced no audio (or decode failed), still surface the text.
+          const aid = activeAssistantIdRef.current;
+          if (aid && pendingAssistantTextRef.current && ttsSourceRef.current === null) {
+            updateMsg(aid, { text: pendingAssistantTextRef.current, isStreaming: false });
+          }
           startTransition(() => { setMode(isRecordingRef.current ? "listening" : "responding"); });
           if (!isRecordingRef.current) {
             normalCloseRef.current = true;

@@ -30,6 +30,9 @@ class Settings(BaseSettings):
     # Minimum audio buffer before emitting (ms). Lower = faster, but more empty results.
     stream_min_audio_ms: int = 600
     stream_llm_min_chars: int = 8
+    # Wait this many ms of partial-stability (no new partial text) before firing LLM.
+    # Lower = more responsive, higher = avoids splitting a single utterance into two replies.
+    stream_llm_silence_ms: int = 900
 
     temp_dir: Path = Path(".cache/audio")
 
