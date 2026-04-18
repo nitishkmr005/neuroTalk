@@ -41,5 +41,6 @@ tsconfig.tsbuildinfo
 *.swp
 *.swo
 
+*.venvs/
 # uv
 # (uv.lock is intentionally tracked)

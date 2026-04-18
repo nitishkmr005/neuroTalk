@@ -7,7 +7,8 @@ dependencies = [
   "fastapi>=0.115.0",
   "faster-whisper>=1.1.1",
   "loguru>=0.7.3",
-  "numpy>=2.2.5",
+  "numpy>=1.24.0,<2.0.0; python_version < '3.13'",
+  "numpy>=2.0.0; python_version >= '3.13'",
   "ollama>=0.3.0",
   "pydantic-settings>=2.7.1",
   "python-dotenv>=1.0.1",
@@ -17,5 +18,69 @@ dependencies = [
   "websockets>=15.0.1",
 ]
 
+[dependency-groups]
+chatterbox_model = [
+  "chatterbox-tts",
+  "soundfile>=0.13.1",
+  "torch==2.6.0; python_version < '3.14'",
+  "torch>=2.9.0; python_version >= '3.14'",
+  "torchaudio==2.6.0; python_version < '3.14'",
+  "torchaudio>=2.9.0; python_version >= '3.14'",
+]
+qwen_model = [
+  "qwen-tts",
+  "soundfile>=0.13.1",
+  "torch==2.6.0; python_version < '3.14'",
+  "torch>=2.9.0; python_version >= '3.14'",
+  "torchaudio==2.6.0; python_version < '3.14'",
+  "torchaudio>=2.9.0; python_version >= '3.14'",
+]
+vibevoice_model = [
+  "soundfile>=0.13.1",
+  "torch==2.6.0; python_version < '3.14'",
+  "torch>=2.9.0; python_version >= '3.14'",
+  "torchaudio==2.6.0; python_version < '3.14'",
+  "torchaudio>=2.9.0; python_version >= '3.14'",
+  "vibevoice",
+]
+omnivoice_model = [
+  "omnivoice",
+  "soundfile>=0.13.1",
+  "torch==2.6.0; python_version < '3.14'",
+  "torch>=2.9.0; python_version >= '3.14'",
+  "torchaudio==2.6.0; python_version < '3.14'",
+  "torchaudio>=2.9.0; python_version >= '3.14'",
+]
+
 [tool.uv]
 package = false
+conflicts = [
+  [
+    { group = "chatterbox_model" },
+    { group = "qwen_model" },
+  ],
+  [
+    { group = "chatterbox_model" },
+    { group = "vibevoice_model" },
+  ],
+  [
+    { group = "chatterbox_model" },
+    { group = "omnivoice_model" },
+  ],
+  [
+    { group = "qwen_model" },
+    { group = "vibevoice_model" },
+  ],
+  [
+    { group = "qwen_model" },
+    { group = "omnivoice_model" },
+  ],
+  [
+    { group = "vibevoice_model" },
+    { group = "omnivoice_model" },
+  ],
+]
+
+[tool.uv.sources]
+chatterbox-tts = { git = "https://github.com/resemble-ai/chatterbox", branch = "master" }
+vibevoice = { git = "https://github.com/microsoft/VibeVoice", branch = "main" }

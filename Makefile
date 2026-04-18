@@ -6,7 +6,7 @@ LLM_MODEL     = gemma4:latest
 
 .PHONY: setup backend-install frontend-install backend frontend dev run \
         check free-ports free-backend-port free-frontend-port \
-        ollama ollama-pull
+        ollama ollama-pull tts-envs tts-report
 
 # ── Install ───────────────────────────────────────────────────────────────────
 
@@ -17,6 +17,15 @@ backend-install:
 
 frontend-install:
 	$(NPM_FRONTEND) install
+
+tts-envs:
+	uv sync --project scripts/tts_projects/chatterbox
+	uv sync --project scripts/tts_projects/qwen
+	uv sync --project scripts/tts_projects/vibevoice
+	uv sync --project scripts/tts_projects/kokoro
+
+tts-report: tts-envs
+	python3 scripts/tts.py
 
 # ── Servers ───────────────────────────────────────────────────────────────────
 

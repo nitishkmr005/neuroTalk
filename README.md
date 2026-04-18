@@ -97,3 +97,5 @@ uv run --project backend python scripts/agent.py path/to/audio.wav
 | `make frontend` | Frontend only |
 | `make setup` | Install all dependencies |
 | `make check` | Lint + type check |
+| `make tts-envs` | Install isolated venvs for all TTS models |
+| `make tts-report` | Run all TTS models and save comparison report to `scripts/speech/` |

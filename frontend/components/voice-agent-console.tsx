@@ -55,33 +55,33 @@ const modeConfig: Record<
   }
 > = {
   listening: {
-    eyebrow: "Live conversation in progress",
-    headline: "Listening to the conversation as it happens.",
+    eyebrow: "Live conversation active",
+    headline: "Capturing the caller in real time.",
     summary:
       "The assistant is capturing the call in real time so associates can follow the conversation without losing context.",
     accent: "active-listening",
   },
   thinking: {
-    eyebrow: "Transcript updating",
-    headline: "Refreshing the live conversation view.",
+    eyebrow: "Live transcript updating",
+    headline: "Refreshing the conversation as speech arrives.",
     summary:
       "The transcript is being updated continuously to help associates track customer intent, details, and phrasing.",
     accent: "deep-reasoning",
   },
   responding: {
-    eyebrow: "Conversation captured",
-    headline: "Review the latest conversation transcript.",
+    eyebrow: "Assistant reply in progress",
+    headline: "Streaming the next response back to the agent.",
     summary:
-      "When the session stops, the assistant finalizes the latest transcript so associates can review the call clearly.",
+      "The assistant is turning the latest transcript into a live reply so associates can react without waiting for the session to end.",
     accent: "voice-delivery",
   },
 };
 
 const orchestrationSteps = [
-  { label: "Microphone capture", detail: "PCM audio streamed in real-time over WebSocket to the backend.", status: "online" },
-  { label: "Speech-to-Text (STT)", detail: "faster-whisper transcribes audio incrementally with VAD filtering.", status: "online" },
-  { label: "LLM reasoning", detail: "Ollama (llama3.2) responds to the transcript as speech is detected.", status: "online" },
-  { label: "Text-to-Speech (TTS)", detail: "Voice synthesis — coming soon to complete the full voice loop.", status: "pending" },
+  { label: "Live Audio Capture", detail: "PCM audio streamed in real-time over WebSocket to the backend.", status: "online" },
+  { label: "Incremental Transcription", detail: "faster-whisper transcribes audio incrementally with VAD filtering.", status: "online" },
+  { label: "Response Generation", detail: "Ollama (llama3.2) responds to the transcript as speech is detected.", status: "online" },
+  { label: "Voice Playback", detail: "Voice synthesis — coming soon to complete the full voice loop.", status: "pending" },
 ];
 
 const waveformHeights = [28, 46, 32, 64, 24, 58, 38, 72, 44, 30, 66, 35, 54, 26, 60, 40];
@@ -482,25 +482,25 @@ export function VoiceAgentConsole() {
   const latencyCards = [
     {
       title: "STT",
-      label: "Speech-to-Text",
+      label: "Transcription",
       value: formatSeconds(metrics?.transcribe_ms),
       detail: "faster-whisper transcription time per buffer pass.",
     },
     {
       title: "LLM",
-      label: "AI Response",
+      label: "Response Generation",
       value: formatSeconds(llmLatencyMs),
       detail: "End-to-end Ollama response time for the last completed reply.",
     },
     {
       title: "TTS",
-      label: "Text-to-Speech",
+      label: "Voice Playback",
       value: "--",
       detail: "Voice synthesis latency — coming soon.",
     },
     {
       title: "E2E",
-      label: "Overall",
+      label: "Turn Latency",
       value: formatSeconds(metrics?.total_ms != null && llmLatencyMs != null ? metrics.total_ms + llmLatencyMs : (metrics?.total_ms ?? null)),
       detail: "Combined STT + LLM pipeline time for the last session.",
     },
@@ -511,8 +511,8 @@ export function VoiceAgentConsole() {
       <section className="console-frame">
         <header className="topbar surface">
           <div>
-            <p className="kicker">NeuroTalk / Associate Assist</p>
-            <h1>Live Conversation Assist Console.</h1>
+            <p className="kicker">NeuroTalk / Voice Agent Console</p>
+            <h1>Real-Time Conversation Control Center.</h1>
           </div>
           <div className="topbar-meta">
             <span className="status-pill is-live">Live call support</span>
@@ -604,7 +604,7 @@ export function VoiceAgentConsole() {
           <aside className="telemetry-stack">
             <article className="surface telemetry-panel">
               <div className="section-heading">
-                <p className="kicker">Audio Health</p>
+                <p className="kicker">Live Signal Monitor</p>
                 <span className="mini-dot" />
               </div>
               <div className="metric-grid">
@@ -643,7 +643,7 @@ export function VoiceAgentConsole() {
 
             <article className="surface transcript-panel">
               <div className="section-heading">
-                <p className="kicker">Conversation</p>
+                <p className="kicker">Live Conversation Feed</p>
                 <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
                   <span className="status-pill is-ghost">{error ? "Attention needed" : isRecording ? "Live" : messages.length ? "Done" : "Ready"}</span>
                   <button
@@ -724,8 +724,8 @@ export function VoiceAgentConsole() {
         <section className="dashboard-grid">
           <article className="surface stack-panel">
             <div className="section-heading">
-              <p className="kicker">Pipeline Steps</p>
-              <span className="section-note">Active modules in the voice agent pipeline</span>
+              <p className="kicker">Voice Pipeline Status</p>
+              <span className="section-note">Active stages driving the live agent loop</span>
             </div>
             <div className="stack-list">
               {orchestrationSteps.map((step) => (
@@ -742,8 +742,8 @@ export function VoiceAgentConsole() {
 
           <article className="surface insights-panel">
             <div className="section-heading">
-              <p className="kicker">Latency Breakdown</p>
-              <span className="section-note">Pipeline timing for the last conversation turn</span>
+              <p className="kicker">Turn Timing Breakdown</p>
+              <span className="section-note">Latency across the latest live interaction</span>
             </div>
             <div className="card-grid">
               {latencyCards.map((card) => (
