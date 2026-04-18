@@ -358,6 +358,7 @@ export function VoiceAgentConsole() {
         if (payload.type === "llm_partial") {
           const aid = activeAssistantIdRef.current;
           if (aid) updateMsg(aid, { text: payload.text ?? "", isStreaming: true });
+          startTransition(() => { setMode("responding"); });
           return;
         }
 
@@ -365,16 +366,21 @@ export function VoiceAgentConsole() {
           const aid = activeAssistantIdRef.current;
           if (aid) updateMsg(aid, { text: payload.text ?? "", isStreaming: false });
           if (payload.llm_ms != null) setLlmLatencyMs(payload.llm_ms);
-          normalCloseRef.current = true;
-          socket.close();
+          startTransition(() => { setMode(isRecordingRef.current ? "listening" : "responding"); });
+          if (!isRecordingRef.current) {
+            normalCloseRef.current = true;
+            socket.close();
+          }
           return;
         }
 
         if (payload.type === "llm_error") {
           const aid = activeAssistantIdRef.current;
           if (aid) updateMsg(aid, { text: "AI unavailable — make sure Ollama is running.", isStreaming: false, isError: true });
-          normalCloseRef.current = true;
-          socket.close();
+          if (!isRecordingRef.current) {
+            normalCloseRef.current = true;
+            socket.close();
+          }
           return;
         }
 

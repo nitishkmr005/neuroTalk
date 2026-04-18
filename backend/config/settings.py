@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     stt_language: str = ""
     stream_emit_interval_ms: int = 1200
     stream_min_audio_ms: int = 900
+    stream_llm_min_chars: int = 8
 
     temp_dir: Path = Path(".cache/audio")
 

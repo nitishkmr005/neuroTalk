@@ -7,10 +7,12 @@ dependencies = [
   "fastapi>=0.115.0",
   "faster-whisper>=1.1.1",
   "loguru>=0.7.3",
+  "numpy>=2.2.5",
   "ollama>=0.3.0",
   "pydantic-settings>=2.7.1",
   "python-dotenv>=1.0.1",
   "python-multipart>=0.0.20",
+  "sounddevice>=0.5.2",
   "uvicorn>=0.34.0",
   "websockets>=15.0.1",
 ]

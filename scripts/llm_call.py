@@ -21,13 +21,13 @@ import sys
 import time
 
 OLLAMA_HOST = "http://localhost:11434"
-MODEL = "llama3.2"
+MODEL = "gemma4:latest"#"llama3.2"
 SYSTEM_PROMPT = (
     "You are a concise voice assistant for customer service. "
     "Respond in 1-3 sentences only. Plain spoken language — no markdown."
 )
 
-DEFAULT_TRANSCRIPT = "I need help resetting my account password."
+DEFAULT_TRANSCRIPT = "What all capabilities do you have as a voice assistant?"
 
 
 def stream_response(transcript: str) -> None:
@@ -72,5 +72,5 @@ if __name__ == "__main__":
         stream_response(prompt)
     except Exception as e:
         print(f"\n[error] {e}")
-        print("Make sure Ollama is running: ollama serve && ollama pull llama3.2")
+        print(f"Make sure Ollama is running: ollama serve && ollama pull {MODEL}")
         sys.exit(1)

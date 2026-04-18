@@ -1,7 +1,7 @@
 """
 Structured per-session log writer for the NeuroTalk pipeline.
 
-Produces one JSON file per WebSocket session under logs/sessions/.
+Produces one JSON file per WebSocket session under logs/.
 Each file has clearly separated STT, LLM, and TTS sections so you
 can see latency, tokens, errors, and I/O for every pipeline stage.
 """
@@ -13,7 +13,7 @@ from pathlib import Path
 
 from loguru import logger
 
-_SESSIONS_DIR = Path("logs") / "sessions"
+_SESSIONS_DIR = Path("logs")
 
 
 def _iso() -> str:

@@ -1,85 +1,105 @@
 """
-stt.py — Standalone Speech-to-Text demo using faster-whisper.
+stt.py — Minimal live microphone speech-to-text demo.
 
 What this teaches:
-  - Loading a Whisper model with quantisation (int8 = fast CPU inference)
-  - Transcribing a WAV file and reading segment-level output
-  - Measuring model load time vs. transcription time separately
+  - Capture microphone audio in short chunks
+  - Write one temporary WAV file per chunk
+  - Run faster-whisper on each chunk and print the transcript with timing
 
 Usage (from repo root):
-  uv run --project backend python scripts/stt.py path/to/audio.wav
-  uv run --project backend python scripts/stt.py          # uses built-in demo sine wave
+  uv run --project backend python scripts/stt.py
 """
 
-import sys
-import wave
-import struct
-import math
+import queue
+import tempfile
 import time
+import wave
 from pathlib import Path
 
-# ---------------------------------------------------------------------------
-# Config — change these or set via env
-# ---------------------------------------------------------------------------
-MODEL_SIZE = "small.en"   # tiny.en | base.en | small.en | medium.en | large-v3
+import numpy as np
+import sounddevice as sd
+from faster_whisper import WhisperModel
+
+MODEL_SIZE = "small"
 DEVICE = "cpu"
-COMPUTE_TYPE = "int8"     # int8 (fast) | float16 (GPU) | float32 (slow CPU)
-LANGUAGE = "en"
+COMPUTE_TYPE = "int8"
+SAMPLE_RATE = 16_000
+CHUNK_SECONDS = 2.5
+LANGUAGE = None
 VAD_FILTER = True
 
 
-def generate_demo_wav(path: Path, frequency: float = 440.0, duration: float = 2.0, sample_rate: int = 16000) -> None:
-    """Write a pure sine-wave WAV so the script runs without a real audio file."""
-    with wave.open(str(path), "w") as f:
-        f.setnchannels(1)
-        f.setsampwidth(2)
-        f.setframerate(sample_rate)
-        frames = []
-        for i in range(int(sample_rate * duration)):
-            sample = int(32767 * math.sin(2 * math.pi * frequency * i / sample_rate))
-            frames.append(struct.pack("<h", sample))
-        f.writeframes(b"".join(frames))
-    print(f"[demo] Generated sine-wave WAV → {path}")
+def write_wav(path: Path, audio: np.ndarray) -> None:
+    pcm16 = np.clip(audio, -1.0, 1.0)
+    pcm16 = (pcm16 * 32767).astype(np.int16)
+    with wave.open(str(path), "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(SAMPLE_RATE)
+        wav_file.writeframes(pcm16.tobytes())
 
 
-def transcribe(audio_path: Path) -> None:
-    from faster_whisper import WhisperModel  # type: ignore
+def transcribe_chunk(model: WhisperModel, audio: np.ndarray) -> tuple[str, float]:
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_file:
+        temp_path = Path(temp_file.name)
 
-    print(f"\n{'─'*50}")
-    print(f"  Model : {MODEL_SIZE}  device={DEVICE}  compute={COMPUTE_TYPE}")
-    print(f"  File  : {audio_path}")
-    print(f"{'─'*50}")
+    try:
+        write_wav(temp_path, audio)
+        started_at = time.perf_counter()
+        segments, _ = model.transcribe(
+            str(temp_path),
+            language=LANGUAGE,
+            beam_size=1,
+            vad_filter=VAD_FILTER,
+        )
+        elapsed_ms = round((time.perf_counter() - started_at) * 1000, 1)
+        text = " ".join(segment.text.strip() for segment in segments if segment.text.strip()).strip()
+        return text, elapsed_ms
+    finally:
+        temp_path.unlink(missing_ok=True)
 
-    # 1. Load model — time it separately (cached after first run)
-    t0 = time.perf_counter()
+
+def main() -> None:
+    print("Loading faster-whisper model...")
+    load_started_at = time.perf_counter()
     model = WhisperModel(MODEL_SIZE, device=DEVICE, compute_type=COMPUTE_TYPE)
-    load_ms = round((time.perf_counter() - t0) * 1000, 1)
-    print(f"  Model loaded in {load_ms} ms")
+    load_ms = round((time.perf_counter() - load_started_at) * 1000, 1)
+    print(f"Model ready in {load_ms} ms")
+    print("Listening. Press Ctrl+C to stop.\n")
 
-    # 2. Transcribe
-    t1 = time.perf_counter()
-    segments, info = model.transcribe(
-        str(audio_path),
-        language=LANGUAGE or None,
-        beam_size=1,
-        vad_filter=VAD_FILTER,
-    )
-    text = " ".join(seg.text.strip() for seg in segments)
-    transcribe_ms = round((time.perf_counter() - t1) * 1000, 1)
+    audio_queue: queue.Queue[np.ndarray] = queue.Queue()
 
-    print(f"  Language detected : {info.language} (prob={info.language_probability:.2f})")
-    print(f"  Transcription time: {transcribe_ms} ms")
-    print(f"\n  Transcript → \"{text or '[no speech detected]'}\"\n")
+    def on_audio(indata: np.ndarray, frames: int, time_info: object, status: sd.CallbackFlags) -> None:
+        del frames, time_info
+        if status:
+            print(f"[audio] {status}")
+        audio_queue.put(indata.copy().reshape(-1))
+
+    buffered_chunks: list[np.ndarray] = []
+    target_samples = int(SAMPLE_RATE * CHUNK_SECONDS)
+
+    try:
+        with sd.InputStream(
+            samplerate=SAMPLE_RATE,
+            channels=1,
+            dtype="float32",
+            blocksize=2048,
+            callback=on_audio,
+        ):
+            while True:
+                buffered_chunks.append(audio_queue.get())
+                buffered_audio = np.concatenate(buffered_chunks)
+                if buffered_audio.size < target_samples:
+                    continue
+
+                text, transcribe_ms = transcribe_chunk(model, buffered_audio[:target_samples])
+                buffered_chunks = [buffered_audio[target_samples:]] if buffered_audio.size > target_samples else []
+
+                transcript = text or "[no speech detected]"
+                print(f"{transcript}  ({transcribe_ms} ms)")
+    except KeyboardInterrupt:
+        print("\nStopped.")
 
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1:
-        audio = Path(sys.argv[1])
-        if not audio.exists():
-            print(f"Error: file not found → {audio}")
-            sys.exit(1)
-    else:
-        audio = Path("/tmp/neurotalk_demo.wav")
-        generate_demo_wav(audio)
-
-    transcribe(audio)
+    main()
