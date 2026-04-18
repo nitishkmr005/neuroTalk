@@ -2,6 +2,7 @@ import asyncio
 import base64
 from contextlib import suppress
 import json
+import re
 import wave
 from pathlib import Path
 from time import perf_counter
@@ -186,14 +187,37 @@ async def transcribe_stream(websocket: WebSocket) -> None:
         async with send_lock:
             await websocket.send_json(payload)
 
-    async def synthesize_and_send(text: str) -> None:
+    _SENT_BOUNDARY = re.compile(r"[.!?](?:\s|$)")
+
+    async def synthesize_and_send(full_text: str, first_sent_task: asyncio.Future | None, first_sent_end: int) -> None:
         if interrupt_event.is_set():
             return
         tts_t0 = perf_counter()
         await send_json({"type": "tts_start"})
         try:
             tts_service = get_tts_service()
-            wav_bytes, sample_rate = await tts_service.synthesize(text)
+            loop = asyncio.get_event_loop()
+
+            if first_sent_task is not None:
+                # Sentence 1 synthesis was started during LLM streaming — await it now
+                wav1, sr1 = await first_sent_task
+                remainder = full_text[first_sent_end:].strip()
+                if remainder and not interrupt_event.is_set():
+                    wav2, sr2 = await loop.run_in_executor(None, tts_service._run_inference, remainder)
+                    # Concatenate: strip WAV header (44 bytes) from part 2, rewrite combined
+                    combined_pcm = wav1[44:] + wav2[44:]
+                    buf = __import__("io").BytesIO()
+                    with wave.open(buf, "wb") as wf:
+                        wf.setnchannels(1)
+                        wf.setsampwidth(2)
+                        wf.setframerate(sr1)
+                        wf.writeframes(combined_pcm)
+                    wav_bytes, sr = buf.getvalue(), sr1
+                else:
+                    wav_bytes, sr = wav1, sr1
+            else:
+                wav_bytes, sr = await tts_service.synthesize(full_text)
+
         except Exception as tts_err:
             logger.warning("request_id={} event=tts_error error={}", request_id, tts_err)
             return
@@ -202,11 +226,16 @@ async def transcribe_stream(websocket: WebSocket) -> None:
         tts_ms = round((perf_counter() - tts_t0) * 1000, 2)
         logger.info("request_id={} event=tts_done tts_ms={}", request_id, tts_ms)
         wav_b64 = base64.b64encode(wav_bytes).decode()
-        await send_json({"type": "tts_audio", "data": wav_b64, "sample_rate": sample_rate, "tts_ms": tts_ms})
+        await send_json({"type": "tts_audio", "data": wav_b64, "sample_rate": sr, "tts_ms": tts_ms})
         await send_json({"type": "tts_done"})
 
     async def run_llm_stream(text: str, trigger: str) -> None:
-        nonlocal llm_task, pending_llm_call, latest_llm_input
+        nonlocal llm_task, pending_llm_call, latest_llm_input, last_text_sent, chunk_count, last_emit_at
+        # Clear audio buffer — this utterance is captured; next audio is a new turn
+        pcm_buffer.clear()
+        last_text_sent = ""
+        chunk_count = 0
+        last_emit_at = 0.0
         interrupt_event.clear()
         llm_t0 = perf_counter()
         call_ts = _iso()
@@ -215,11 +244,26 @@ async def transcribe_stream(websocket: WebSocket) -> None:
         call_error: str | None = None
         latest_llm_input = text
 
+        first_sent_task: asyncio.Future | None = None
+        first_sent_end = 0
+
         try:
             await send_json({"type": "llm_start"})
             async for token in stream_llm_response(text):
                 full_response += token
                 await send_json({"type": "llm_partial", "text": strip_emotion_tags(full_response)})
+                # Fire sentence-1 TTS as soon as first sentence boundary is detected
+                if first_sent_task is None and not interrupt_event.is_set():
+                    m = _SENT_BOUNDARY.search(full_response)
+                    if m and m.end() >= 20:
+                        first_sent_end = m.end()
+                        snippet = full_response[:first_sent_end].strip()
+                        tts_svc = get_tts_service()
+                        loop = asyncio.get_event_loop()
+                        first_sent_task = asyncio.ensure_future(
+                            loop.run_in_executor(None, tts_svc._run_inference, snippet)
+                        )
+                        logger.info("request_id={} event=tts_early_start snippet_len={}", request_id, len(snippet))
             llm_ms = round((perf_counter() - llm_t0) * 1000, 2)
             logger.info("request_id={} event=llm_done llm_ms={}", request_id, llm_ms)
             display_text = strip_emotion_tags(full_response)
@@ -253,8 +297,12 @@ async def transcribe_stream(websocket: WebSocket) -> None:
             )
         )
 
+        if first_sent_task is not None and (interrupt_event.is_set() or call_error is not None):
+            first_sent_task.cancel()
+            first_sent_task = None
+
         if full_response and call_error is None:
-            await synthesize_and_send(full_response)
+            await synthesize_and_send(full_response, first_sent_task, first_sent_end)
 
         if pending_llm_call is None:
             llm_task = None
@@ -343,7 +391,7 @@ async def transcribe_stream(websocket: WebSocket) -> None:
                             )
                         )
 
-                        if final_text and session_log.stt_partial_run_count > 0:
+                        if final_text and session_log.stt_partial_run_count > 0 and final_text.strip() != latest_llm_input:
                             schedule_llm_stream(final_text, "final")
                     else:
                         await send_json(
