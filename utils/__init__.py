@@ -1,3 +1,0 @@
-"""
-InstaVoice utilities package.
-"""
