@@ -23,6 +23,90 @@
   --shadow-lg: 0 16px 56px rgba(0,0,0,0.09), 0 4px 16px rgba(0,0,0,0.05);
 }
 
+[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0F0E0C;
+  --surface: #1A1814;
+  --surface-alt: #221F1A;
+  --border: rgba(255, 245, 220, 0.08);
+  --border-subtle: rgba(255, 245, 220, 0.05);
+  --text: #F0EBE0;
+  --text-2: #A89F92;
+  --text-3: #6B6358;
+  --blue: #6B92F0;
+  --blue-mid: #7BA0F5;
+  --blue-soft: rgba(107, 146, 240, 0.10);
+  --blue-border: rgba(107, 146, 240, 0.18);
+  --amber: #D4924A;
+  --amber-soft: rgba(212, 146, 74, 0.10);
+  --green: #4ABA74;
+  --green-soft: rgba(74, 186, 116, 0.10);
+  --red: #E05454;
+  --red-soft: rgba(224, 84, 84, 0.10);
+  --shadow-sm: 0 1px 3px rgba(0,0,0,0.30), 0 1px 2px rgba(0,0,0,0.20);
+  --shadow: 0 4px 20px rgba(0,0,0,0.40), 0 1px 4px rgba(0,0,0,0.25);
+  --shadow-lg: 0 16px 56px rgba(0,0,0,0.55), 0 4px 16px rgba(0,0,0,0.35);
+}
+
+[data-theme="dark"] body {
+  background:
+    radial-gradient(ellipse 60% 40% at 8% 10%, rgba(107, 146, 240, 0.06) 0%, transparent 70%),
+    radial-gradient(ellipse 50% 35% at 92% 6%, rgba(212, 146, 74, 0.05) 0%, transparent 65%),
+    radial-gradient(ellipse 45% 30% at 75% 88%, rgba(74, 186, 116, 0.04) 0%, transparent 60%),
+    linear-gradient(160deg, #0D0C0A 0%, #111009 50%, #0F0E0C 100%);
+}
+
+[data-theme="dark"] body::before {
+  background-image:
+    radial-gradient(circle, rgba(255, 245, 220, 0.015) 1px, transparent 1px);
+}
+
+[data-theme="dark"] .surface::after {
+  background: linear-gradient(160deg, rgba(255,255,255,0.04) 0%, transparent 38%);
+}
+
+[data-theme="dark"] .chat-bubble--assistant {
+  background: #1E1B16;
+  border-color: rgba(212, 146, 74, 0.14);
+  border-left-color: rgba(212, 146, 74, 0.45);
+}
+
+[data-theme="dark"] .chat-avatar--assistant {
+  background: #261F14;
+  color: #D4924A;
+  border-color: rgba(212, 146, 74, 0.28);
+}
+
+[data-theme="dark"] .status-pill {
+  background: rgba(255,255,255,0.05);
+}
+
+[data-theme="dark"] .transcript-meta {
+  background: rgba(255,255,255,0.04);
+}
+
+.theme-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: rgba(255,255,255,0.06);
+  color: var(--text-2);
+  padding: 0;
+  transition: border-color 160ms ease, background 160ms ease, color 160ms ease, transform 160ms ease;
+  flex-shrink: 0;
+}
+
+.theme-toggle:hover {
+  border-color: var(--blue-border);
+  background: var(--blue-soft);
+  color: var(--blue);
+  transform: rotate(15deg);
+}
+
 *, *::before, *::after {
   box-sizing: border-box;
 }
