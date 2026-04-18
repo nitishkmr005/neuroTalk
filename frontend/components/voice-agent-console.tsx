@@ -131,7 +131,10 @@ function formatSeconds(valueMs: number | null | undefined, options?: { cachedWhe
 }
 
 export function VoiceAgentConsole() {
-  const [isDark, setIsDark] = useState(false);
+  const [isDark, setIsDark] = useState(() => {
+    if (typeof window === "undefined") return false;
+    return localStorage.getItem("nt-theme") === "dark";
+  });
   const [mode, setMode] = useState<Mode>("listening");
   const [isRecording, setIsRecording] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
@@ -170,11 +173,8 @@ export function VoiceAgentConsole() {
   const waveLevelsRef = useRef(initialWaveLevels);
 
   useEffect(() => {
-    const saved = typeof window !== "undefined" ? localStorage.getItem("nt-theme") : null;
-    if (saved === "dark") {
-      setIsDark(true);
-      document.documentElement.setAttribute("data-theme", "dark");
-    }
+    const saved = localStorage.getItem("nt-theme");
+    document.documentElement.setAttribute("data-theme", saved === "dark" ? "dark" : "light");
   }, []);
 
   const toggleTheme = () => {
