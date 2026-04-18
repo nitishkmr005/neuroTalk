@@ -34,6 +34,24 @@ app.add_middleware(
 )
 
 
+async def _warmup_models() -> None:
+    loop = asyncio.get_event_loop()
+
+    stt_t0 = perf_counter()
+    try:
+        await loop.run_in_executor(None, get_stt_service()._load_model)
+        logger.info("event=stt_warmup_done ms={}", round((perf_counter() - stt_t0) * 1000))
+    except Exception as err:
+        logger.warning("event=stt_warmup_failed error={}", err)
+
+    tts_t0 = perf_counter()
+    try:
+        await get_tts_service().synthesize("Hello.")
+        logger.info("event=tts_warmup_done ms={}", round((perf_counter() - tts_t0) * 1000))
+    except Exception as err:
+        logger.warning("event=tts_warmup_failed error={}", err)
+
+
 @app.on_event("startup")
 async def startup_event() -> None:
     settings.temp_dir.mkdir(parents=True, exist_ok=True)
@@ -45,6 +63,7 @@ async def startup_event() -> None:
         settings.temp_dir,
         settings.cors_origins,
     )
+    asyncio.create_task(_warmup_models())
 
 
 @app.get("/health", response_model=HealthResponse)
