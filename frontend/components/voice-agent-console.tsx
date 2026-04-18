@@ -132,8 +132,8 @@ function formatSeconds(valueMs: number | null | undefined, options?: { cachedWhe
 
 export function VoiceAgentConsole() {
   const [isDark, setIsDark] = useState(() => {
-    if (typeof window === "undefined") return false;
-    return localStorage.getItem("nt-theme") === "dark";
+    if (typeof window === "undefined") return true;
+    return localStorage.getItem("nt-theme") !== "light";
   });
   const [mode, setMode] = useState<Mode>("listening");
   const [isRecording, setIsRecording] = useState(false);
@@ -174,7 +174,7 @@ export function VoiceAgentConsole() {
 
   useEffect(() => {
     const saved = localStorage.getItem("nt-theme");
-    document.documentElement.setAttribute("data-theme", saved === "dark" ? "dark" : "light");
+    document.documentElement.setAttribute("data-theme", saved === "light" ? "light" : "dark");
   }, []);
 
   const toggleTheme = () => {

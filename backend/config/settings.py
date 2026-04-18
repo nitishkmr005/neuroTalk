@@ -31,6 +31,10 @@ class Settings(BaseSettings):
 
     temp_dir: Path = Path(".cache/audio")
 
+    # TTS backend — controls which dependency group is installed
+    # Supported: chatterbox | qwen | vibevoice | omnivoice
+    tts_backend: str = "chatterbox"
+
     # LLM — Ollama
     ollama_host: str = "http://localhost:11434"
     llm_model: str = "gemma4:latest"

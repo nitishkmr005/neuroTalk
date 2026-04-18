@@ -1,127 +1,155 @@
 # Claude Code — Project Conventions
 
-Generic conventions for AI agent projects. Copy this file to any new project and adjust names/values.
+Conventions for the NeuroTalk voice agent. Loaded on every Claude session — keep concise and precise.
 
 ---
 
 ## Project Layout
 
 ```
-project/
-├── backend/          Python backend (FastAPI + uv)
-├── frontend/         Next.js frontend (TypeScript)
+neuroTalk/
+├── backend/          FastAPI + uv (Python 3.11+)
+├── frontend/         Next.js 15 (TypeScript)
 ├── scripts/          Standalone learnable .py demos
 ├── docs/
-│   └── blog.md       Narrative explanation of the project
-├── README.md         Minimal setup guide
-├── Makefile          dev / setup / check targets
-├── CLAUDE.md         This file
-├── AGENTS.md         Codex / other agent conventions
-└── .gitignore
+│   ├── blog.md       Project narrative
+│   └── superpowers/  AI-generated specs and plans
+├── README.md
+├── Makefile
+├── ___testing_CLAUDE.md   This file (Claude conventions)
+└── AGENTS.md         Agent conventions
 ```
 
 ---
 
 ## Backend Conventions
 
-**Package manager:** uv (`uv add <pkg>`, `uv run python ...`)
+**Package manager:** uv only. Never `pip` or `poetry`.
 
-**Python version:** 3.11+. Use modern syntax: `X | Y` unions, `match`, `list[str]`.
+**Python:** 3.11+. Use modern syntax: `X | Y` unions, `match`, `list[str]`.
 
 **Folder roles inside `backend/app/`:**
 
 | Folder | Purpose |
 |--------|---------|
-| `services/` | External integrations (STT, LLM, TTS, DB). One class or function per file. |
-| `agents/` | Orchestration logic — chains services together. |
-| `prompts/` | System prompts as Python string constants. Never inline prompts in business logic. |
-| `tools/` | Tool definitions for LLM function-calling. |
-| `modules/` | Reusable domain modules (audio processing, text chunking, etc.). |
-| `utils/` | Pure utility functions with no side effects. |
-| `models.py` | Pydantic models for API request/response shapes. |
-| `main.py` | FastAPI app, routes, and WebSocket handlers only. |
+| `services/` | External integrations (STT, LLM, TTS). One class or function per file. |
+| `agents/` | Orchestration — chains services together. |
+| `prompts/` | System prompt constants. Never inline prompts in business logic. |
+| `tools/` | LLM tool/function definitions. |
+| `modules/` | Reusable domain modules. |
+| `utils/` | Pure utility functions, no side effects. |
+| `models.py` | Pydantic request/response schemas. |
+| `main.py` | FastAPI app, routes, WebSocket handlers only. |
 
-**Config pattern:** Always use `pydantic-settings` + `.env`. Never use bare `os.getenv()` in application code.
+**Config pattern:** `pydantic-settings` + `.env` via `config/settings.py`. Never use bare `os.getenv()`.
 
-```python
-# config/settings.py
-from pydantic_settings import BaseSettings, SettingsConfigDict
+**Never commit `.env`.** Always maintain `.env.example`.
 
-class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
-    app_name: str = "My Agent"
-    some_api_key: str = ""
+---
 
-from functools import lru_cache
+## TTS Backend Switching
 
-@lru_cache(maxsize=1)
-def get_settings() -> Settings:
-    return Settings()
-```
+Four TTS models are available as uv dependency groups: `chatterbox` (default), `qwen`, `vibevoice`, `omnivoice`.
 
-**Never commit `.env`.** Always maintain `.env.example` with safe placeholder values.
+- Install a specific model: `make backend-install TTS_BACKEND=qwen`
+- Default is `chatterbox` — set in Makefile and `.env`
+- Only one model group can be installed at a time (uv conflicts enforced)
+- `settings.tts_backend` reflects which model is active
+
+To switch: change `TTS_BACKEND` in `.env`, re-run `make backend-install TTS_BACKEND=<value>`, update `backend/app/services/tts.py` to import the new model class.
 
 ---
 
 ## Logging
 
-Two sinks — always set both up at startup:
+Two sinks — distinct purposes, both always set up at startup.
 
-**Terminal (human):**
+**Terminal sink** (runtime/human): colorized Loguru output to stdout. Used for live debugging, startup messages, and request tracing during development. Not persisted.
+
 ```python
 logger.add(sys.stdout, colorize=True, format="<green>{time:HH:mm:ss}</green> | <level>{level}</level> | <cyan>{name}</cyan> | <level>{message}</level>")
 ```
 
-**JSON files (machine):**
+**JSON file sink** (`backend/logs/`): structured output for performance analysis, debugging, and LLM tracing. These files are the persistent record — used to analyze latency, trace LLM calls, and debug production issues.
+
 ```python
 logger.add("logs/app_{time}.json", serialize=True, rotation="10 MB", retention=5)
 ```
 
 Rules:
-- Log files go in `backend/logs/` — gitignored, `.gitkeep` commits the folder
-- Keep only the latest 5 files (`retention=5`)
+- `backend/logs/` — gitignored, `.gitkeep` commits the folder
+- Keep only latest 5 files (`retention=5`)
 - Never use `print()` — always `logger.info / debug / warning / error`
 - Log structured key=value pairs: `logger.info("event=llm_done latency_ms={}", ms)`
+- LLM calls must log: model, token count, latency, prompt hash
+
+---
+
+## Frontend Conventions
+
+**Stack:** Next.js 15 · TypeScript · CSS custom properties (no Tailwind).
+
+**Theme system:**
+- CSS custom property tokens defined in `:root` (light) and `[data-theme="dark"]` blocks in `globals.css`
+- `data-theme` attribute set on `<html>` element
+- localStorage key: `nt-theme` — values: `"dark"` | `"light"`
+- **Dark is the default theme** — applied when no saved preference exists
+- Toggle implemented in `VoiceAgentConsole` via `isDark` state + `toggleTheme()`
+- Theme initializes synchronously via lazy `useState` initializer to prevent FOUC
+
+---
+
+## Deployment
+
+| Layer | Platform | Notes |
+|-------|----------|-------|
+| Frontend | Vercel | Auto-deploys from `main`. Set `NEXT_PUBLIC_BACKEND_URL` env var to Railway URL. |
+| Backend | Railway | Dockerfile or Nixpacks. Set all `.env` vars as Railway env vars. Expose port 8000. |
+
+**Vercel setup:** Connect GitHub repo → select `frontend/` as root directory → add env var `NEXT_PUBLIC_BACKEND_URL=https://<railway-app>.up.railway.app`.
+
+**Railway setup:** Connect GitHub repo → select `backend/` as root → set all env vars from `.env.example` → service starts with `uvicorn app.main:app --host 0.0.0.0 --port $PORT`.
+
+---
+
+## Authentication (Supabase)
+
+Supabase handles user authentication.
+
+- Client: `@supabase/supabase-js` in frontend
+- Env vars: `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY` (frontend); `SUPABASE_SERVICE_ROLE_KEY` (backend only — never expose to client)
+- Auth flow: email/password or OAuth via Supabase Auth UI or custom forms
+- Backend route protection: verify JWT from `Authorization: Bearer <token>` header using Supabase admin client
+- Never store session tokens in localStorage — use Supabase's built-in session management
 
 ---
 
 ## Scripts Folder
 
-`scripts/` contains standalone, runnable, heavily-commented `.py` files — one per module. They exist to teach how each component works in isolation.
+`scripts/` — standalone, runnable `.py` files. One per module. Teach how each component works in isolation.
 
 Rules:
-- Each script runs with `uv run --project backend python scripts/<name>.py`
+- Runs with `uv run --project backend python scripts/<name>.py`
 - No shared imports between scripts — self-contained
-- Has a `"""docstring"""` at the top explaining what it teaches and how to run it
-- Has a `if __name__ == "__main__":` block with a working demo
-- Prints timing information so the reader can see latency
+- Docstring at top: what it teaches and how to run it
+- `if __name__ == "__main__":` block with working demo
+- Prints timing output
 
----
-
-## Docs
-
-`docs/blog.md` — narrative blog post explaining the project. Covers:
-- The problem being solved
-- ASCII architecture diagram
-- Key technical choices and why
-- Latency breakdown table
-- What was learned
-- What's next
-
-`README.md` at root — minimal. Covers: what it is, stack table, quick start, env vars, project structure, makefile commands.
+`scripts/tts_projects/` — isolated uv environments per TTS model for benchmarking. Run via `make tts-report`.
 
 ---
 
 ## Makefile Targets
 
-Standard targets for every project:
-
 ```makefile
-make setup    # install all deps (uv sync + npm install)
-make dev      # start backend + frontend with hot-reload
-make backend  # backend only
-make frontend # frontend only
-make check    # lint + type check
+make setup                              # install all deps
+make dev                                # backend + frontend (hot-reload)
+make backend                            # backend only
+make frontend                           # frontend only
+make check                              # lint + type check
+make backend-install TTS_BACKEND=qwen   # install specific TTS model group
+make tts-envs                           # install all 4 TTS venvs
+make tts-report                         # benchmark all TTS models → scripts/speech/
 ```
 
 ---
@@ -129,16 +157,16 @@ make check    # lint + type check
 ## Code Style
 
 - Type-annotate all function signatures
-- Prefer `async def` for I/O-bound functions
+- `async def` for all I/O-bound functions
 - No bare `except:` — always catch specific exceptions
 - Use `loguru` not `logging`
 - Import order: stdlib → third-party → local (enforced by ruff)
-- No TODO comments in committed code — create a GitHub issue instead
+- No TODO comments in committed code
 
 ---
 
 ## .gitignore Essentials
 
-Always ignore: `.env`, `.venv`, `__pycache__`, `*.pyc`, `.cache`, `logs/`, `node_modules/`, `.next/`, `.DS_Store`
+Ignore: `.env`, `.venv`, `__pycache__`, `*.pyc`, `.cache`, `logs/`, `node_modules/`, `.next/`, `.DS_Store`
 
-Always track: `.env.example`, `logs/.gitkeep`
+Track: `.env.example`, `logs/.gitkeep`

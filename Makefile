@@ -3,6 +3,7 @@ NPM_FRONTEND  = npm --prefix frontend
 BACKEND_PORT  = 8000
 FRONTEND_PORT = 3000
 LLM_MODEL     = gemma4:latest
+TTS_BACKEND  ?= chatterbox
 
 .PHONY: setup backend-install frontend-install backend frontend dev run \
         check free-ports free-backend-port free-frontend-port \
@@ -13,7 +14,7 @@ LLM_MODEL     = gemma4:latest
 setup: backend-install frontend-install
 
 backend-install:
-	$(UV_BACKEND) sync --group chatterbox_model
+	$(UV_BACKEND) sync --group $(TTS_BACKEND)_model
 
 frontend-install:
 	$(NPM_FRONTEND) install

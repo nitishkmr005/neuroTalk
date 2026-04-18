@@ -85,6 +85,36 @@
   background: rgba(255,255,255,0.04);
 }
 
+[data-theme="dark"] .orb-ring {
+  border-color: rgba(107, 146, 240, 0.22);
+}
+
+[data-theme="dark"] .orb-ring-1 {
+  box-shadow:
+    0 0 calc(20px + var(--orb-glow, 0.35) * 30px) rgba(107, 146, 240, 0.22),
+    inset 0 0 24px rgba(107, 146, 240, 0.08);
+}
+
+[data-theme="dark"] .orb-ring-2 {
+  border-color: rgba(150, 130, 255, 0.25);
+}
+
+[data-theme="dark"] .orb-center {
+  background:
+    radial-gradient(circle at 32% 26%, rgba(255,255,255,0.75) 0%, transparent 38%),
+    radial-gradient(circle at center, #7BA0F5 0%, #6B92F0 45%, #3A5ED4 80%);
+  box-shadow:
+    0 0 calc(48px + var(--orb-glow, 0.35) * 64px) rgba(107, 146, 240, 0.65),
+    0 0 80px rgba(107, 146, 240, 0.28),
+    inset 0 -4px 12px rgba(0,0,0,0.35),
+    inset 0 0 24px rgba(255,255,255,0.10);
+}
+
+[data-theme="dark"] .orb-scanline {
+  border-color: rgba(107, 146, 240, 0.10);
+  background: linear-gradient(180deg, transparent 0%, rgba(107, 146, 240, 0.12) 50%, transparent 100%);
+}
+
 .theme-toggle {
   display: inline-flex;
   align-items: center;
