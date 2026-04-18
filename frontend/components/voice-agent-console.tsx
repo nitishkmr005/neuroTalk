@@ -2,7 +2,7 @@
 
 import { startTransition, useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 
-type Mode = "listening" | "thinking" | "responding";
+type Mode = "listening" | "thinking" | "responding" | "speaking";
 
 type ChatMessage = {
   id: string;
@@ -36,13 +36,15 @@ type DebugInfo = {
 };
 
 type StreamMessage = {
-  type: "ready" | "partial" | "final" | "error" | "llm_start" | "llm_partial" | "llm_final" | "llm_error";
+  type: "ready" | "partial" | "final" | "error" | "llm_start" | "llm_partial" | "llm_final" | "llm_error" | "tts_start" | "tts_audio" | "tts_done";
   request_id?: string;
   text?: string;
   message?: string;
   timings_ms?: Metrics;
   debug?: DebugInfo;
   llm_ms?: number;
+  data?: string;
+  tts_ms?: number;
 };
 
 const modeConfig: Record<
@@ -75,6 +77,13 @@ const modeConfig: Record<
       "The assistant is turning the latest transcript into a live reply so associates can react without waiting for the session to end.",
     accent: "voice-delivery",
   },
+  speaking: {
+    eyebrow: "AI voice active",
+    headline: "Speaking the reply aloud.",
+    summary:
+      "Chatterbox Turbo is synthesising the AI reply into speech. Speak at any time to interrupt and take your turn.",
+    accent: "voice-delivery",
+  },
 };
 
 const orchestrationSteps = [
@@ -88,6 +97,8 @@ const waveformHeights = [28, 46, 32, 64, 24, 58, 38, 72, 44, 30, 66, 35, 54, 26,
 const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8000";
 const websocketUrl = `${backendUrl.replace(/^http/, "ws")}/ws/transcribe`;
 const initialWaveLevels = waveformHeights.map(() => 0.18);
+const BARGE_IN_THRESHOLD = 0.15;
+const BARGE_IN_FRAMES = 2;
 
 function float32ToInt16(input: Float32Array): Int16Array {
   const output = new Int16Array(input.length);
@@ -132,6 +143,10 @@ export function VoiceAgentConsole() {
   const [waveLevels, setWaveLevels] = useState(initialWaveLevels);
   const [copied, setCopied] = useState(false);
   const [llmLatencyMs, setLlmLatencyMs] = useState<number | null>(null);
+  const [ttsLatencyMs, setTtsLatencyMs] = useState<number | null>(null);
+  const ttsSourceRef = useRef<AudioBufferSourceNode | null>(null);
+  const interruptSentRef = useRef(false);
+  const bargeinFrameCountRef = useRef(0);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const activeUserIdRef = useRef<string | null>(null);
   const activeAssistantIdRef = useRef<string | null>(null);
