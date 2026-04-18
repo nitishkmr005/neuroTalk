@@ -1,10 +1,40 @@
 "use client";
 
-import { startTransition, useDeferredValue, useEffect, useState, type CSSProperties } from "react";
+import { startTransition, useEffect, useRef, useState, type CSSProperties } from "react";
 
 type Mode = "listening" | "thinking" | "responding";
 
-const modeOrder: Mode[] = ["listening", "thinking", "responding"];
+type Metrics = {
+  request_read_ms: number;
+  file_write_ms: number;
+  model_load_ms: number;
+  transcribe_ms: number;
+  total_ms: number;
+  buffered_audio_ms: number;
+  client_roundtrip_ms: number | null;
+};
+
+type DebugInfo = {
+  request_id: string;
+  filename: string;
+  audio_bytes: number;
+  detected_language: string | null;
+  segments: number;
+  model_size: string;
+  device: string;
+  compute_type: string;
+  sample_rate: number | null;
+  chunks_received: number | null;
+};
+
+type StreamMessage = {
+  type: "ready" | "partial" | "final" | "error";
+  request_id?: string;
+  text?: string;
+  message?: string;
+  timings_ms?: Metrics;
+  debug?: DebugInfo;
+};
 
 const modeConfig: Record<
   Mode,
@@ -13,123 +43,334 @@ const modeConfig: Record<
     headline: string;
     summary: string;
     accent: string;
-    latency: string;
-    confidence: string;
-    voice: string;
   }
 > = {
   listening: {
-    eyebrow: "Acquisition layer engaged",
-    headline: "Hearing context before it becomes text.",
+    eyebrow: "Microphone stream open",
+    headline: "Listening and transcribing while you speak.",
     summary:
-      "The agent is isolating intent, emotional contour, and operational constraints from the raw voice stream.",
+      "The browser streams raw PCM audio over WebSocket. Partial transcript updates appear during the live session instead of only after you stop.",
     accent: "active-listening",
-    latency: "112 ms",
-    confidence: "98.2%",
-    voice: "Wideband capture",
   },
   thinking: {
-    eyebrow: "Reasoning lattice in motion",
-    headline: "Synthesizing memory, tools, and strategy in real time.",
+    eyebrow: "Live transcription running",
+    headline: "Refreshing the transcript from the growing audio buffer.",
     summary:
-      "The system is ranking actions, checking internal policy, and preparing a response path with tool awareness.",
+      "The backend rewrites the current PCM buffer to WAV, runs faster-whisper, and returns updated text plus latency metrics on a timed interval.",
     accent: "deep-reasoning",
-    latency: "184 ms",
-    confidence: "96.4%",
-    voice: "Cognitive mesh",
   },
   responding: {
-    eyebrow: "Speech engine delivering",
-    headline: "Answering with precision, timing, and tone control.",
+    eyebrow: "Final transcript returned",
+    headline: "Inspect the completed text and timing breakdown.",
     summary:
-      "The response layer is shaping cadence, grounding the answer, and streaming speech with adaptive turn-taking.",
+      "When you stop the microphone, the backend performs one final pass and returns the latest transcript, request id, and timing values for debugging.",
     accent: "voice-delivery",
-    latency: "138 ms",
-    confidence: "99.1%",
-    voice: "Expressive synthesis",
   },
-};
-
-const transcriptBank: Record<Mode, string[]> = {
-  listening: [
-    "User voiceprint verified. Acoustic noise floor normalized.",
-    "Intent candidates detected: scheduling, technical planning, phased rollout.",
-    "Emphasis pattern suggests the user wants ambition without backend coupling yet.",
-  ],
-  thinking: [
-    "Cross-referencing interface goals against future orchestration hooks.",
-    "Prioritizing a visual shell that can later expose live VAD, tool calls, and transcript state.",
-    "Selecting a response posture: confident, concise, operationally transparent.",
-  ],
-  responding: [
-    "Streaming interface guidance: present a premium prototype with strong motion and clear modular zones.",
-    "Answer structure tuned for a technical builder: immediate visibility, live metrics, extensible cards.",
-    "Turn closing with room for backend expansion: websocket audio, function traces, memory ledger.",
-  ],
 };
 
 const orchestrationSteps = [
-  { label: "Intent parser", detail: "Semantic pressure map built from live utterance.", status: "online" },
-  { label: "Memory fabric", detail: "Session history compressed into fast retrieval cues.", status: "stable" },
-  { label: "Tool router", detail: "Awaiting backend adapters for actions and retrieval.", status: "pending" },
-  { label: "Voice renderer", detail: "Prosody engine prepared for adaptive delivery.", status: "online" },
+  { label: "PCM capture", detail: "Web Audio collects mono microphone samples and converts them to 16-bit PCM.", status: "online" },
+  { label: "WebSocket stream", detail: "Chunks are sent continuously to the backend while the microphone is active.", status: "online" },
+  { label: "Incremental STT", detail: "faster-whisper re-transcribes the growing buffer on a fixed cadence.", status: "stable" },
+  { label: "Debug telemetry", detail: "Every partial result includes latency and request details for fast diagnosis.", status: "online" },
 ];
 
-const systemCards = [
-  {
-    title: "Conversation gravity",
-    value: "14.8x",
-    detail: "Signal-to-noise focus during multi-step dialogue.",
-  },
-  {
-    title: "Reasoning depth",
-    value: "Layer 07",
-    detail: "Fast path, reflective path, and response guardrails are aligned.",
-  },
-  {
-    title: "Context retention",
-    value: "92 min",
-    detail: "Short-term memory budget reserved for live sessions.",
-  },
-];
-
-const presets = [
-  { name: "Strategist", tone: "Measured, high-context, boardroom calm." },
-  { name: "Operator", tone: "Fast, directive, low-latency execution." },
-  { name: "Concierge", tone: "Warm, anticipatory, premium assistance." },
+const runtimeNotes = [
+  { name: "Run both apps", tone: "Use `make dev` to start the backend and frontend together in one command." },
+  { name: "Small / CPU", tone: "Good initial model for simple local development and easier iteration on the pipeline." },
+  { name: "Buffered updates", tone: "This is near-real-time incremental transcription, not token-by-token streaming." },
 ];
 
 const waveformHeights = [28, 46, 32, 64, 24, 58, 38, 72, 44, 30, 66, 35, 54, 26, 60, 40];
+const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8000";
+const websocketUrl = `${backendUrl.replace(/^http/, "ws")}/ws/transcribe`;
+
+function float32ToInt16(input: Float32Array): Int16Array {
+  const output = new Int16Array(input.length);
+  for (let index = 0; index < input.length; index += 1) {
+    const sample = Math.max(-1, Math.min(1, input[index]));
+    output[index] = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
+  }
+  return output;
+}
 
 export function VoiceAgentConsole() {
-  const [mode, setMode] = useState<Mode>("thinking");
-  const [transcriptIndex, setTranscriptIndex] = useState(0);
+  const [mode, setMode] = useState<Mode>("listening");
+  const [isRecording, setIsRecording] = useState(false);
+  const [isConnecting, setIsConnecting] = useState(false);
+  const [isFinalizing, setIsFinalizing] = useState(false);
+  const [transcript, setTranscript] = useState("Start recording to stream microphone audio and see live transcription updates.");
+  const [error, setError] = useState<string | null>(null);
+  const [metrics, setMetrics] = useState<Metrics | null>(null);
+  const [debugInfo, setDebugInfo] = useState<DebugInfo | null>(null);
+
+  const websocketRef = useRef<WebSocket | null>(null);
+  const mediaStreamRef = useRef<MediaStream | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const sourceNodeRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const processorNodeRef = useRef<ScriptProcessorNode | null>(null);
+  const gainNodeRef = useRef<GainNode | null>(null);
+  const sessionStartedAtRef = useRef<number | null>(null);
+  const streamReadyRef = useRef(false);
+  const isFinalizingRef = useRef(false);
+  const receivedFinalRef = useRef(false);
+  const normalCloseRef = useRef(false);
+  const errorRef = useRef<string | null>(null);
 
   useEffect(() => {
-    const transcriptTimer = window.setInterval(() => {
-      startTransition(() => {
-        setTranscriptIndex((current) => current + 1);
-      });
-    }, 2600);
+    errorRef.current = error;
+  }, [error]);
 
-    const modeTimer = window.setInterval(() => {
-      startTransition(() => {
-        setMode((current) => {
-          const currentIndex = modeOrder.indexOf(current);
-          return modeOrder[(currentIndex + 1) % modeOrder.length];
-        });
-      });
-    }, 7200);
+  const stopAudioGraph = () => {
+    processorNodeRef.current?.disconnect();
+    sourceNodeRef.current?.disconnect();
+    gainNodeRef.current?.disconnect();
+    processorNodeRef.current = null;
+    sourceNodeRef.current = null;
+    gainNodeRef.current = null;
 
+    mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
+    mediaStreamRef.current = null;
+
+    if (audioContextRef.current) {
+      void audioContextRef.current.close();
+      audioContextRef.current = null;
+    }
+  };
+
+  useEffect(() => {
     return () => {
-      window.clearInterval(transcriptTimer);
-      window.clearInterval(modeTimer);
+      stopAudioGraph();
+      websocketRef.current?.close();
+      websocketRef.current = null;
     };
   }, []);
 
-  const transcript = transcriptBank[mode][transcriptIndex % transcriptBank[mode].length];
-  const deferredTranscript = useDeferredValue(transcript);
+  const applyStreamPayload = (payload: StreamMessage) => {
+    if (payload.text !== undefined) {
+      setTranscript(payload.text || "No speech detected yet.");
+    }
+
+    if (payload.timings_ms) {
+      const sessionRoundtripMs =
+        sessionStartedAtRef.current === null ? null : Number((performance.now() - sessionStartedAtRef.current).toFixed(2));
+      setMetrics({
+        ...payload.timings_ms,
+        client_roundtrip_ms: sessionRoundtripMs,
+      });
+    }
+
+    if (payload.debug) {
+      setDebugInfo(payload.debug);
+    }
+  };
+
+  const startStreaming = async () => {
+    try {
+      setError(null);
+      setMetrics(null);
+      setDebugInfo(null);
+      setTranscript("Opening the microphone and connecting to the backend stream...");
+      setIsConnecting(true);
+      setIsFinalizing(false);
+      isFinalizingRef.current = false;
+      receivedFinalRef.current = false;
+      normalCloseRef.current = false;
+
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount: 1,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      });
+      mediaStreamRef.current = stream;
+
+      const socket = new WebSocket(websocketUrl);
+      socket.binaryType = "arraybuffer";
+      websocketRef.current = socket;
+      sessionStartedAtRef.current = performance.now();
+      streamReadyRef.current = false;
+
+      socket.onopen = async () => {
+        const audioContext = new AudioContext();
+        audioContextRef.current = audioContext;
+
+        const sourceNode = audioContext.createMediaStreamSource(stream);
+        const processorNode = audioContext.createScriptProcessor(4096, 1, 1);
+        const gainNode = audioContext.createGain();
+        gainNode.gain.value = 0;
+
+        sourceNode.connect(processorNode);
+        processorNode.connect(gainNode);
+        gainNode.connect(audioContext.destination);
+
+        sourceNodeRef.current = sourceNode;
+        processorNodeRef.current = processorNode;
+        gainNodeRef.current = gainNode;
+
+        processorNode.onaudioprocess = (event) => {
+          if (!streamReadyRef.current || socket.readyState !== WebSocket.OPEN) {
+            return;
+          }
+
+          const channelData = event.inputBuffer.getChannelData(0);
+          const pcm16 = float32ToInt16(channelData);
+          socket.send(pcm16.buffer);
+        };
+
+        socket.send(
+          JSON.stringify({
+            type: "start",
+            sample_rate: audioContext.sampleRate,
+          }),
+        );
+
+        setIsConnecting(false);
+        setIsRecording(true);
+        startTransition(() => {
+          setMode("listening");
+        });
+      };
+
+      socket.onmessage = (event) => {
+        const payload = JSON.parse(event.data) as StreamMessage;
+
+        if (payload.type === "ready") {
+          streamReadyRef.current = true;
+          setTranscript("Live stream connected. Start speaking.");
+          if (payload.request_id) {
+            setDebugInfo((current) => ({
+              request_id: payload.request_id ?? current?.request_id ?? "--",
+              filename: current?.filename ?? "stream.wav",
+              audio_bytes: current?.audio_bytes ?? 0,
+              detected_language: current?.detected_language ?? null,
+              segments: current?.segments ?? 0,
+              model_size: current?.model_size ?? "--",
+              device: current?.device ?? "--",
+              compute_type: current?.compute_type ?? "--",
+              sample_rate: current?.sample_rate ?? null,
+              chunks_received: current?.chunks_received ?? null,
+            }));
+          }
+          return;
+        }
+
+        if (payload.type === "partial") {
+          applyStreamPayload(payload);
+          startTransition(() => {
+            setMode("thinking");
+          });
+          return;
+        }
+
+        if (payload.type === "final") {
+          receivedFinalRef.current = true;
+          normalCloseRef.current = true;
+          applyStreamPayload(payload);
+          setIsFinalizing(false);
+          isFinalizingRef.current = false;
+          startTransition(() => {
+            setMode("responding");
+          });
+          socket.close();
+          return;
+        }
+
+        if (payload.type === "error") {
+          const message = payload.message ?? "Streaming transcription failed.";
+          errorRef.current = message;
+          setError(message);
+          setIsFinalizing(false);
+          isFinalizingRef.current = false;
+          startTransition(() => {
+            setMode("listening");
+          });
+        }
+      };
+
+      socket.onerror = () => {
+        const message = `Could not connect to backend stream at ${websocketUrl}. Run make dev and retry.`;
+        errorRef.current = message;
+        setError(message);
+        setTranscript("Streaming connection failed before transcription could start.");
+        setIsConnecting(false);
+        setIsRecording(false);
+        setIsFinalizing(false);
+        stopAudioGraph();
+      };
+
+      socket.onclose = (event) => {
+        streamReadyRef.current = false;
+        websocketRef.current = null;
+        setIsConnecting(false);
+        setIsRecording(false);
+
+        const wasExpectedClose =
+          normalCloseRef.current || receivedFinalRef.current || isFinalizingRef.current || event.code === 1000;
+
+        if (!wasExpectedClose && !errorRef.current) {
+          const message = `Streaming connection closed unexpectedly at ${websocketUrl}.`;
+          errorRef.current = message;
+          setError(message);
+        }
+
+        stopAudioGraph();
+      };
+    } catch (caughtError) {
+      const message = caughtError instanceof Error ? caughtError.message : "Microphone access failed.";
+      setError(message);
+      errorRef.current = message;
+      setTranscript("Unable to start live transcription.");
+      setIsConnecting(false);
+      setIsRecording(false);
+      setIsFinalizing(false);
+      stopAudioGraph();
+    }
+  };
+
+  const stopStreaming = () => {
+    const socket = websocketRef.current;
+    setIsRecording(false);
+    setIsFinalizing(true);
+    isFinalizingRef.current = true;
+    normalCloseRef.current = true;
+    stopAudioGraph();
+
+    if (socket?.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: "stop" }));
+      startTransition(() => {
+        setMode("thinking");
+      });
+      return;
+    }
+
+    setIsFinalizing(false);
+    isFinalizingRef.current = false;
+  };
+
   const activeMode = modeConfig[mode];
+  const controlLabel = isRecording ? "Stop Streaming" : isConnecting ? "Connecting..." : "Start Live Transcription";
+  const controlDisabled = isConnecting || isFinalizing;
+
+  const latencyCards = [
+    {
+      title: "Total latency",
+      value: metrics ? `${metrics.total_ms} ms` : "--",
+      detail: "Per-update backend processing time for the current buffer pass.",
+    },
+    {
+      title: "Buffered audio",
+      value: metrics ? `${metrics.buffered_audio_ms} ms` : "--",
+      detail: "How much microphone audio has been accumulated for the current transcript window.",
+    },
+    {
+      title: "Transcribe pass",
+      value: metrics ? `${metrics.transcribe_ms} ms` : "--",
+      detail: "Time spent in faster-whisper for the latest incremental transcription run.",
+    },
+  ];
 
   return (
     <main className="console-shell">
@@ -140,8 +381,8 @@ export function VoiceAgentConsole() {
             <h1>Control surface for an intelligence-first voice interface.</h1>
           </div>
           <div className="topbar-meta">
-            <span className="status-pill is-live">Frontend prototype</span>
-            <span className="status-pill">Backend hooks later</span>
+            <span className="status-pill is-live">Realtime STT stream</span>
+            <span className="status-pill">{websocketUrl}</span>
           </div>
         </header>
 
@@ -177,18 +418,34 @@ export function VoiceAgentConsole() {
               </div>
             </div>
 
+            <div className="controls-row">
+              <button
+                type="button"
+                className={isRecording ? "control-button is-recording" : "control-button"}
+                disabled={controlDisabled}
+                onClick={isRecording ? stopStreaming : () => void startStreaming()}
+              >
+                {controlLabel}
+              </button>
+              <div className="control-hints">
+                <span>
+                  {isRecording
+                    ? "Microphone is active and PCM chunks are streaming"
+                    : isFinalizing
+                      ? "Waiting for the final transcript pass"
+                      : "Ready to open a live WebSocket transcription session"}
+                </span>
+                <span>{error ?? "Partial transcript updates will appear while you speak"}</span>
+              </div>
+            </div>
+
             <div className="mode-switcher">
-              {modeOrder.map((item) => (
+              {(["listening", "thinking", "responding"] as Mode[]).map((item) => (
                 <button
                   type="button"
                   key={item}
-                  className={item === mode ? "mode-button is-selected" : "mode-button"}
-                  onClick={() => {
-                    startTransition(() => {
-                      setMode(item);
-                      setTranscriptIndex(0);
-                    });
-                  }}
+                  className={item === mode ? "mode-button is-selected" : "mode-button is-static"}
+                  disabled
                 >
                   {item}
                 </button>
@@ -204,33 +461,33 @@ export function VoiceAgentConsole() {
               </div>
               <div className="metric-grid">
                 <div>
-                  <span>Response latency</span>
-                  <strong>{activeMode.latency}</strong>
+                  <span>Total latency</span>
+                  <strong>{metrics ? `${metrics.total_ms} ms` : "--"}</strong>
                 </div>
                 <div>
-                  <span>Intent certainty</span>
-                  <strong>{activeMode.confidence}</strong>
+                  <span>Model load</span>
+                  <strong>{metrics ? `${metrics.model_load_ms} ms` : "--"}</strong>
                 </div>
                 <div>
-                  <span>Voice profile</span>
-                  <strong>{activeMode.voice}</strong>
+                  <span>Transcribe time</span>
+                  <strong>{metrics ? `${metrics.transcribe_ms} ms` : "--"}</strong>
                 </div>
                 <div>
-                  <span>Turn sync</span>
-                  <strong>Bi-directional</strong>
+                  <span>Client session</span>
+                  <strong>{metrics?.client_roundtrip_ms ? `${metrics.client_roundtrip_ms} ms` : "--"}</strong>
                 </div>
               </div>
             </article>
 
             <article className="surface transcript-panel">
               <div className="section-heading">
-                <p className="kicker">Live internal transcript</p>
-                <span className="status-pill is-ghost">Mock stream</span>
+                <p className="kicker">Transcribed text</p>
+                <span className="status-pill is-ghost">{error ? "Error state" : isRecording ? "Live partials" : "Latest result"}</span>
               </div>
-              <p className="transcript-line">{deferredTranscript}</p>
+              <p className="transcript-line">{transcript}</p>
               <div className="transcript-footer">
-                <span>Speaker energy balanced</span>
-                <span>Turn prediction locked</span>
+                <span>{error ?? `Request ID: ${debugInfo?.request_id ?? "--"}`}</span>
+                <span>Language: {debugInfo?.detected_language ?? "--"}</span>
               </div>
             </article>
           </aside>
@@ -239,8 +496,8 @@ export function VoiceAgentConsole() {
         <section className="dashboard-grid">
           <article className="surface stack-panel">
             <div className="section-heading">
-              <p className="kicker">Cognitive stack</p>
-              <span className="section-note">Designed to plug into the backend later</span>
+              <p className="kicker">Streaming stack</p>
+              <span className="section-note">Minimal live path with current backend</span>
             </div>
             <div className="stack-list">
               {orchestrationSteps.map((step) => (
@@ -257,11 +514,11 @@ export function VoiceAgentConsole() {
 
           <article className="surface insights-panel">
             <div className="section-heading">
-              <p className="kicker">Intelligence profile</p>
-              <span className="section-note">Operator facing overview</span>
+              <p className="kicker">Latency profile</p>
+              <span className="section-note">Useful for tuning stream cadence and model choice</span>
             </div>
             <div className="card-grid">
-              {systemCards.map((card) => (
+              {latencyCards.map((card) => (
                 <div className="info-card" key={card.title}>
                   <span>{card.title}</span>
                   <strong>{card.value}</strong>
@@ -273,16 +530,25 @@ export function VoiceAgentConsole() {
 
           <article className="surface presets-panel">
             <div className="section-heading">
-              <p className="kicker">Voice posture presets</p>
-              <span className="section-note">Prepared personas for future synthesis</span>
+              <p className="kicker">Runtime notes</p>
+              <span className="section-note">Simple operational guidance for the current implementation</span>
             </div>
             <div className="preset-list">
-              {presets.map((preset) => (
-                <div className="preset-card" key={preset.name}>
-                  <h3>{preset.name}</h3>
-                  <p>{preset.tone}</p>
+              {runtimeNotes.map((item) => (
+                <div className="preset-card" key={item.name}>
+                  <h3>{item.name}</h3>
+                  <p>{item.tone}</p>
                 </div>
               ))}
+            </div>
+            <div className="debug-strip">
+              <span>Buffered: {metrics ? `${metrics.buffered_audio_ms} ms` : "--"}</span>
+              <span>Chunks: {debugInfo?.chunks_received ?? "--"}</span>
+              <span>Bytes: {debugInfo?.audio_bytes ?? "--"}</span>
+              <span>Read: {metrics ? `${metrics.request_read_ms} ms` : "--"}</span>
+              <span>Write: {metrics ? `${metrics.file_write_ms} ms` : "--"}</span>
+              <span>Model: {debugInfo ? `${debugInfo.model_size} / ${debugInfo.device} / ${debugInfo.compute_type}` : "--"}</span>
+              <span>Sample rate: {debugInfo?.sample_rate ?? "--"}</span>
             </div>
           </article>
         </section>

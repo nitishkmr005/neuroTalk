@@ -299,6 +299,45 @@ button {
   gap: 12px;
 }
 
+.controls-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 16px;
+}
+
+.control-button {
+  border: 1px solid rgba(107, 231, 255, 0.35);
+  border-radius: 999px;
+  padding: 14px 22px;
+  color: var(--bg);
+  background: linear-gradient(135deg, var(--cyan-strong), #d2f9ff);
+  cursor: pointer;
+  transition: transform 180ms ease, box-shadow 180ms ease, opacity 180ms ease;
+  box-shadow: 0 14px 34px rgba(107, 231, 255, 0.24);
+}
+
+.control-button:hover:not(:disabled) {
+  transform: translateY(-2px);
+}
+
+.control-button:disabled {
+  cursor: wait;
+  opacity: 0.72;
+}
+
+.control-button.is-recording {
+  background: linear-gradient(135deg, #ff9a78, #ffd4b5);
+  border-color: rgba(255, 143, 122, 0.45);
+  box-shadow: 0 14px 34px rgba(255, 143, 122, 0.2);
+}
+
+.control-hints {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+}
+
 .mode-button {
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 999px;
@@ -316,6 +355,15 @@ button {
   border-color: rgba(107, 231, 255, 0.35);
   background: rgba(107, 231, 255, 0.08);
   transform: translateY(-2px);
+}
+
+.mode-button:disabled {
+  cursor: default;
+  opacity: 1;
+}
+
+.mode-button.is-static {
+  transform: none;
 }
 
 .telemetry-stack,
@@ -444,6 +492,17 @@ button {
 .card-grid,
 .preset-list {
   grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.debug-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 18px;
+  margin-top: 20px;
+  padding-top: 18px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  color: var(--muted);
+  font-size: 0.92rem;
 }
 
 @keyframes slow-spin {
