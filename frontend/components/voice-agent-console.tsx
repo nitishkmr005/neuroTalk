@@ -1,6 +1,6 @@
 "use client";
 
-import { startTransition, useEffect, useRef, useState, type CSSProperties } from "react";
+import { startTransition, useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 
 type Mode = "listening" | "thinking" | "responding";
 
@@ -121,6 +121,7 @@ export function VoiceAgentConsole() {
   const [debugInfo, setDebugInfo] = useState<DebugInfo | null>(null);
   const [amplitude, setAmplitude] = useState(0.08);
   const [waveLevels, setWaveLevels] = useState(initialWaveLevels);
+  const [copied, setCopied] = useState(false);
 
   const websocketRef = useRef<WebSocket | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
@@ -364,6 +365,13 @@ export function VoiceAgentConsole() {
     }
   };
 
+  const copyTranscript = useCallback(() => {
+    void navigator.clipboard.writeText(transcript).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  }, [transcript]);
+
   const stopStreaming = () => {
     const socket = websocketRef.current;
     setIsRecording(false);
@@ -492,7 +500,7 @@ export function VoiceAgentConsole() {
                       ? "Finalizing the latest conversation transcript"
                       : "Ready to start a live conversation capture"}
                 </span>
-                <span>{error ?? "Transcript updates will appear during the conversation"}</span>
+                <span className={error ? "is-error" : ""}>{error ?? "Transcript updates will appear during the conversation"}</span>
               </div>
             </div>
 
@@ -556,7 +564,27 @@ export function VoiceAgentConsole() {
                 <span className="status-pill is-ghost">{error ? "Attention needed" : isRecording ? "Live capture" : "Latest capture"}</span>
               </div>
               <div className="transcript-stage">
-                <p className="transcript-label">Conversation text</p>
+                <div className="transcript-label-row">
+                  <p className="transcript-label">Conversation text</p>
+                  <button
+                    type="button"
+                    className={`copy-button${copied ? " is-copied" : ""}`}
+                    onClick={copyTranscript}
+                    aria-label="Copy transcript"
+                  >
+                    {copied ? (
+                      <>
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+                        Copied
+                      </>
+                    ) : (
+                      <>
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                        Copy
+                      </>
+                    )}
+                  </button>
+                </div>
                 <p className="transcript-line">{transcript}</p>
               </div>
               <div className="transcript-footer">
