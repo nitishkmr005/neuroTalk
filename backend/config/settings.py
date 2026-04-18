@@ -33,7 +33,7 @@ class Settings(BaseSettings):
 
     # TTS backend — controls which dependency group is installed
     # Supported: chatterbox | qwen | vibevoice | omnivoice
-    tts_backend: str = "chatterbox"
+    tts_backend: str = "kokoro"
 
     # LLM — Ollama
     ollama_host: str = "http://localhost:11434"

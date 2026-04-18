@@ -11,7 +11,8 @@ Designed for two contexts: **customer-facing** (direct query answering) and **as
 | Frontend | Next.js 15 · TypeScript · Lora + DM Serif Display fonts |
 | Backend | FastAPI · Python 3.11+ · uv |
 | STT | faster-whisper (`small.en`, int8, CPU) |
-| LLM | Ollama (local) — `llama3.2` |
+| LLM | Ollama (local) — `gemma4` |
+| TTS | Kokoro 82M MLX (default) · Chatterbox Turbo · Qwen · VibeVoice |
 | Transport | WebSocket streaming |
 | Config | Pydantic Settings + `.env` |
 | Logging | Loguru — colorful terminal + rotating JSON files |
@@ -42,8 +43,40 @@ Copy `backend/.env.example` → `backend/.env` and adjust as needed.
 | `STT_MODEL_SIZE` | `small.en` | Whisper model (`tiny.en` → `large-v3`) |
 | `STT_DEVICE` | `cpu` | `cpu` or `cuda` |
 | `OLLAMA_HOST` | `http://localhost:11434` | Ollama server URL |
-| `LLM_MODEL` | `llama3.2` | Any model pulled via `ollama pull` |
+| `LLM_MODEL` | `gemma4:latest` | Any model pulled via `ollama pull` |
 | `LLM_MAX_TOKENS` | `150` | Max tokens per LLM response |
+| `TTS_BACKEND` | `kokoro` | TTS engine — see below |
+
+## Switching TTS Models
+
+Four TTS engines are available. Only one is installed at a time.
+
+| Backend | Value | Notes |
+|---------|-------|-------|
+| Kokoro 82M MLX | `kokoro` | **Default.** Fast, natural. Apple Silicon only. |
+| Chatterbox Turbo | `chatterbox` | Emotion tag support. Requires PyTorch. |
+| Qwen TTS | `qwen` | Requires PyTorch. |
+| VibeVoice | `vibevoice` | Requires PyTorch. |
+
+**To switch:**
+
+```bash
+# 1. Set the backend in backend/.env
+TTS_BACKEND=chatterbox   # or kokoro / qwen / vibevoice
+
+# 2. Reinstall backend deps with the new model group
+make backend-install TTS_BACKEND=chatterbox
+
+# 3. Restart the backend
+make backend
+```
+
+One-liner (no .env change needed):
+```bash
+make dev TTS_BACKEND=chatterbox
+```
+
+> **Note:** `kokoro` uses `mlx-audio` which requires Apple Silicon (macOS). For Linux/cloud deployment, use `chatterbox` or `qwen`.
 
 ## Project Structure
 

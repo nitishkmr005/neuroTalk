@@ -3,7 +3,7 @@ NPM_FRONTEND  = npm --prefix frontend
 BACKEND_PORT  = 8000
 FRONTEND_PORT = 3000
 LLM_MODEL     = gemma4:latest
-TTS_BACKEND  ?= chatterbox
+TTS_BACKEND  ?= kokoro
 
 .PHONY: setup backend-install frontend-install backend frontend dev run \
         check free-ports free-backend-port free-frontend-port \

@@ -19,6 +19,11 @@ dependencies = [
 ]
 
 [dependency-groups]
+kokoro_model = [
+  "mlx-audio>=0.4.0",
+  "misaki[en]>=0.9.4",
+  "soundfile>=0.13.1",
+]
 chatterbox_model = [
   "chatterbox-tts",
   "soundfile>=0.13.1",
@@ -61,30 +66,16 @@ dev = [
 [tool.uv]
 package = false
 conflicts = [
-  [
-    { group = "chatterbox_model" },
-    { group = "qwen_model" },
-  ],
-  [
-    { group = "chatterbox_model" },
-    { group = "vibevoice_model" },
-  ],
-  [
-    { group = "chatterbox_model" },
-    { group = "omnivoice_model" },
-  ],
-  [
-    { group = "qwen_model" },
-    { group = "vibevoice_model" },
-  ],
-  [
-    { group = "qwen_model" },
-    { group = "omnivoice_model" },
-  ],
-  [
-    { group = "vibevoice_model" },
-    { group = "omnivoice_model" },
-  ],
+  [{ group = "kokoro_model" }, { group = "chatterbox_model" }],
+  [{ group = "kokoro_model" }, { group = "qwen_model" }],
+  [{ group = "kokoro_model" }, { group = "vibevoice_model" }],
+  [{ group = "kokoro_model" }, { group = "omnivoice_model" }],
+  [{ group = "chatterbox_model" }, { group = "qwen_model" }],
+  [{ group = "chatterbox_model" }, { group = "vibevoice_model" }],
+  [{ group = "chatterbox_model" }, { group = "omnivoice_model" }],
+  [{ group = "qwen_model" }, { group = "vibevoice_model" }],
+  [{ group = "qwen_model" }, { group = "omnivoice_model" }],
+  [{ group = "vibevoice_model" }, { group = "omnivoice_model" }],
 ]
 
 [tool.uv.sources]
