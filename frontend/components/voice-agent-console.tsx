@@ -183,6 +183,8 @@ export function VoiceAgentConsole() {
     processorNodeRef.current = null;
     sourceNodeRef.current = null;
     gainNodeRef.current = null;
+    ttsSourceRef.current?.stop();
+    ttsSourceRef.current = null;
     amplitudeRef.current = 0.08;
     setAmplitude(0.08);
     waveLevelsRef.current = initialWaveLevels;
@@ -231,6 +233,7 @@ export function VoiceAgentConsole() {
       setDebugInfo(null);
       setTranscript("");
       setLlmLatencyMs(null);
+      setTtsLatencyMs(null);
       activeUserIdRef.current = null;
       activeAssistantIdRef.current = null;
       setIsConnecting(true);
@@ -287,6 +290,23 @@ export function VoiceAgentConsole() {
           const nextBars = [...waveLevelsRef.current.slice(1), smoothedAmplitude];
           waveLevelsRef.current = nextBars;
           setWaveLevels(nextBars);
+
+          if (ttsSourceRef.current && !interruptSentRef.current) {
+            if (rms > BARGE_IN_THRESHOLD) {
+              bargeinFrameCountRef.current += 1;
+              if (bargeinFrameCountRef.current >= BARGE_IN_FRAMES) {
+                interruptSentRef.current = true;
+                ttsSourceRef.current.stop();
+                ttsSourceRef.current = null;
+                if (socket.readyState === WebSocket.OPEN) {
+                  socket.send(JSON.stringify({ type: "interrupt" }));
+                }
+                startTransition(() => { setMode("listening"); });
+              }
+            } else {
+              bargeinFrameCountRef.current = 0;
+            }
+          }
 
           const pcm16 = float32ToInt16(channelData);
           socket.send(pcm16.buffer);
@@ -382,6 +402,12 @@ export function VoiceAgentConsole() {
           if (aid) updateMsg(aid, { text: payload.text ?? "", isStreaming: false });
           if (payload.llm_ms != null) setLlmLatencyMs(payload.llm_ms);
           startTransition(() => { setMode(isRecordingRef.current ? "listening" : "responding"); });
+          return;
+        }
+
+        if (payload.type === "llm_error") {
+          const aid = activeAssistantIdRef.current;
+          if (aid) updateMsg(aid, { text: "AI unavailable — make sure Ollama is running.", isStreaming: false, isError: true });
           if (!isRecordingRef.current) {
             normalCloseRef.current = true;
             socket.close();
@@ -389,9 +415,33 @@ export function VoiceAgentConsole() {
           return;
         }
 
-        if (payload.type === "llm_error") {
-          const aid = activeAssistantIdRef.current;
-          if (aid) updateMsg(aid, { text: "AI unavailable — make sure Ollama is running.", isStreaming: false, isError: true });
+        if (payload.type === "tts_start") {
+          startTransition(() => { setMode("speaking"); });
+          return;
+        }
+
+        if (payload.type === "tts_audio") {
+          if (payload.tts_ms != null) setTtsLatencyMs(payload.tts_ms);
+          const binaryString = atob(payload.data ?? "");
+          const bytes = new Uint8Array(binaryString.length);
+          for (let i = 0; i < binaryString.length; i++) bytes[i] = binaryString.charCodeAt(i);
+          const audioCtx = audioContextRef.current ?? new AudioContext();
+          if (!audioContextRef.current) audioContextRef.current = audioCtx;
+          void audioCtx.decodeAudioData(bytes.buffer.slice(0), (buffer) => {
+            const source = audioCtx.createBufferSource();
+            source.buffer = buffer;
+            source.connect(audioCtx.destination);
+            ttsSourceRef.current = source;
+            interruptSentRef.current = false;
+            bargeinFrameCountRef.current = 0;
+            source.onended = () => { ttsSourceRef.current = null; };
+            source.start();
+          });
+          return;
+        }
+
+        if (payload.type === "tts_done") {
+          startTransition(() => { setMode(isRecordingRef.current ? "listening" : "responding"); });
           if (!isRecordingRef.current) {
             normalCloseRef.current = true;
             socket.close();
