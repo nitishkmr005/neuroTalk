@@ -10,7 +10,7 @@ Designed for two contexts: **customer-facing** (direct query answering) and **as
 |-------|------|
 | Frontend | Next.js 15 · TypeScript · Lora + DM Serif Display fonts |
 | Backend | FastAPI · Python 3.11+ · uv |
-| STT | faster-whisper (`small.en`, int8, CPU) |
+| STT | faster-whisper (`small`, int8, CPU) |
 | LLM | Ollama (local) — `gemma3:1b` (default) |
 | TTS | Kokoro 82M MLX (default) · Chatterbox Turbo · Qwen · VibeVoice |
 | Transport | WebSocket streaming |
@@ -25,7 +25,7 @@ make setup
 
 # 2. Set up Ollama (LLM — local, no API key)
 brew install ollama
-ollama pull llama3.2
+ollama pull gemma3:1b
 ollama serve          # runs at http://localhost:11434
 
 # 3. Run both services
@@ -40,11 +40,11 @@ Copy `backend/.env.example` → `backend/.env` and adjust as needed.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `STT_MODEL_SIZE` | `small.en` | Whisper model (`tiny.en` → `large-v3`) |
+| `STT_MODEL_SIZE` | `small` | Whisper model (`tiny.en` → `large-v3`) |
 | `STT_DEVICE` | `cpu` | `cpu` or `cuda` |
 | `OLLAMA_HOST` | `http://localhost:11434` | Ollama server URL |
-| `LLM_MODEL` | `gemma4:latest` | Any model pulled via `ollama pull` |
-| `LLM_MAX_TOKENS` | `150` | Max tokens per LLM response |
+| `LLM_MODEL` | `gemma3:1b` | Any model pulled via `ollama pull` |
+| `LLM_MAX_TOKENS` | `100` | Max tokens per LLM response |
 | `TTS_BACKEND` | `kokoro` | TTS engine — see below |
 
 ## Switching LLM Models
@@ -58,7 +58,7 @@ NeuroTalk uses Ollama for local LLM inference. Switching models is one line.
 | Gemma 3 1B | `gemma3:1b` | **Default.** Fast, low RAM (~1 GB). |
 | Llama 3.2 1B | `llama3.2:1b` | Similar speed to gemma3:1b. |
 | Gemma 3 4B | `gemma3:4b` | Better quality, ~3 GB RAM. |
-| Gemma 4 | `gemma4:latest` | Highest quality, ~8 GB RAM. |
+| Gemma 3 12B | `gemma3:12b` | Highest quality, ~8 GB RAM. |
 | Mistral 7B | `mistral` | Strong general model. |
 
 ```bash
