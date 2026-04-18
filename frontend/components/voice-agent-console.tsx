@@ -349,15 +349,9 @@ export function VoiceAgentConsole() {
         }
 
         if (payload.type === "llm_start") {
-          const existingAid = activeAssistantIdRef.current;
-          if (existingAid) {
-            // Same session (debounced → final handoff): reset the existing bubble rather than creating a second one
-            updateMsg(existingAid, { text: "", isStreaming: true, isError: false });
-          } else {
-            const aid = crypto.randomUUID();
-            activeAssistantIdRef.current = aid;
-            setMessages((prev) => [...prev, { id: aid, role: "assistant", text: "", isStreaming: true, isError: false }]);
-          }
+          const aid = crypto.randomUUID();
+          activeAssistantIdRef.current = aid;
+          setMessages((prev) => [...prev, { id: aid, role: "assistant", text: "", isStreaming: true, isError: false }]);
           return;
         }
 
@@ -371,20 +365,16 @@ export function VoiceAgentConsole() {
           const aid = activeAssistantIdRef.current;
           if (aid) updateMsg(aid, { text: payload.text ?? "", isStreaming: false });
           if (payload.llm_ms != null) setLlmLatencyMs(payload.llm_ms);
-          if (!isRecordingRef.current) {
-            normalCloseRef.current = true;
-            socket.close();
-          }
+          normalCloseRef.current = true;
+          socket.close();
           return;
         }
 
         if (payload.type === "llm_error") {
           const aid = activeAssistantIdRef.current;
           if (aid) updateMsg(aid, { text: "AI unavailable — make sure Ollama is running.", isStreaming: false, isError: true });
-          if (!isRecordingRef.current) {
-            normalCloseRef.current = true;
-            socket.close();
-          }
+          normalCloseRef.current = true;
+          socket.close();
           return;
         }
 

@@ -32,7 +32,7 @@ class Settings(BaseSettings):
 
     # LLM — Ollama
     ollama_host: str = "http://localhost:11434"
-    llm_model: str = "llama3.2"
+    llm_model: str = "gemma4:latest"
     llm_max_tokens: int = 150
     llm_system_prompt: str = VOICE_AGENT_PROMPT
 

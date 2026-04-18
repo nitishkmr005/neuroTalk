@@ -1,4 +1,3 @@
-import asyncio
 import json
 import wave
 from pathlib import Path
@@ -148,9 +147,6 @@ async def transcribe(audio: UploadFile = File(...)) -> TranscriptionResponse:
         temp_path.unlink(missing_ok=True)
 
 
-LLM_DEBOUNCE_SECONDS = 1.5
-
-
 @app.websocket("/ws/transcribe")
 async def transcribe_stream(websocket: WebSocket) -> None:
     await websocket.accept()
@@ -162,7 +158,6 @@ async def transcribe_stream(websocket: WebSocket) -> None:
     chunk_count = 0
     last_emit_at = 0.0
     last_text_sent = ""
-    llm_task: asyncio.Task | None = None
 
     # ── Session log scaffolding ───────────────────────────────────────────────
     session_log = SessionLog(
@@ -177,15 +172,14 @@ async def transcribe_stream(websocket: WebSocket) -> None:
         llm_system_prompt_preview=settings.llm_system_prompt[:100],
     )
 
-    # ── LLM streaming helpers ─────────────────────────────────────────────────
+    # ── LLM streaming (called once per session, after stop) ───────────────────
 
-    async def run_llm_stream(text: str, trigger: str = "final") -> None:
+    async def run_llm_stream(text: str) -> None:
         llm_t0 = perf_counter()
         call_ts = _iso()
         full_response = ""
         llm_ms = 0.0
         call_error: str | None = None
-        cancelled = False
 
         try:
             await websocket.send_json({"type": "llm_start"})
@@ -193,17 +187,12 @@ async def transcribe_stream(websocket: WebSocket) -> None:
                 full_response += token
                 await websocket.send_json({"type": "llm_partial", "text": full_response})
             llm_ms = round((perf_counter() - llm_t0) * 1000, 2)
-            logger.info("request_id={} event=llm_done trigger={} llm_ms={}", request_id, trigger, llm_ms)
+            logger.info("request_id={} event=llm_done llm_ms={}", request_id, llm_ms)
             await websocket.send_json({"type": "llm_final", "text": full_response, "llm_ms": llm_ms})
-        except asyncio.CancelledError:
-            llm_ms = round((perf_counter() - llm_t0) * 1000, 2)
-            cancelled = True
-            logger.debug("request_id={} event=llm_cancelled trigger={}", request_id, trigger)
-            return  # skip logging cancelled calls that produced no output
         except Exception as llm_err:
             llm_ms = round((perf_counter() - llm_t0) * 1000, 2)
             call_error = str(llm_err)
-            logger.warning("request_id={} event=llm_error trigger={} error={}", request_id, trigger, llm_err)
+            logger.warning("request_id={} event=llm_error error={}", request_id, llm_err)
             try:
                 await websocket.send_json({"type": "llm_error", "message": "LLM unavailable — is Ollama running?"})
             except Exception:
@@ -213,7 +202,7 @@ async def transcribe_stream(websocket: WebSocket) -> None:
         session_log.llm_calls.append(
             LLMCallLog(
                 timestamp=call_ts,
-                trigger=trigger,
+                trigger="final",
                 latency_ms=llm_ms,
                 model=settings.llm_model,
                 host=settings.ollama_host,
@@ -224,24 +213,10 @@ async def transcribe_stream(websocket: WebSocket) -> None:
                 output_preview=full_response[:200],
                 output_length_chars=len(full_response),
                 approx_tokens_out=approx_tokens,
-                cancelled=cancelled,
+                cancelled=False,
                 error=call_error,
             )
         )
-
-    async def debounced_llm(text: str) -> None:
-        await asyncio.sleep(LLM_DEBOUNCE_SECONDS)
-        await run_llm_stream(text, trigger="debounced_partial")
-
-    async def cancel_llm_task() -> None:
-        nonlocal llm_task
-        if llm_task and not llm_task.done():
-            llm_task.cancel()
-            try:
-                await llm_task
-            except asyncio.CancelledError:
-                pass
-        llm_task = None
 
     await websocket.send_json({"type": "ready", "request_id": request_id})
 
@@ -262,8 +237,6 @@ async def transcribe_stream(websocket: WebSocket) -> None:
                     continue
 
                 if event_type == "stop":
-                    await cancel_llm_task()
-
                     if sample_rate and pcm_buffer:
                         audio_duration_ms = round(len(pcm_buffer) / 2 / sample_rate * 1000, 2)
                         audio_file_path = str(settings.temp_dir / f"{request_id}_stream.wav")
@@ -299,7 +272,7 @@ async def transcribe_stream(websocket: WebSocket) -> None:
                         # Only call LLM if the user actually produced audible speech
                         # (at least one partial was emitted). Skips noise/silence sessions.
                         if final_text and session_log.stt_partial_run_count > 0:
-                            await run_llm_stream(final_text, trigger="final")
+                            await run_llm_stream(final_text)
                     else:
                         await websocket.send_json(
                             {
@@ -375,9 +348,6 @@ async def transcribe_stream(websocket: WebSocket) -> None:
                     )
                 )
 
-                await cancel_llm_task()
-                llm_task = asyncio.create_task(debounced_llm(current_text))
-
             last_emit_at = perf_counter()
 
     except WebSocketDisconnect:
@@ -387,7 +357,6 @@ async def transcribe_stream(websocket: WebSocket) -> None:
         logger.exception("request_id={} event=ws_failed error={}", request_id, error)
         await websocket.send_json({"type": "error", "message": "Streaming transcription failed."})
     finally:
-        await cancel_llm_task()
         write_session_log(session_log)
         try:
             await websocket.close()

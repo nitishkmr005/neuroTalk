@@ -1,9 +1,14 @@
-UV_BACKEND = uv --directory backend
-NPM_FRONTEND = npm --prefix frontend
-BACKEND_PORT = 8000
+UV_BACKEND    = uv --directory backend
+NPM_FRONTEND  = npm --prefix frontend
+BACKEND_PORT  = 8000
 FRONTEND_PORT = 3000
+LLM_MODEL     = gemma4:latest
 
-.PHONY: setup backend-install frontend-install backend frontend dev check free-ports free-backend-port free-frontend-port ollama
+.PHONY: setup backend-install frontend-install backend frontend dev run \
+        check free-ports free-backend-port free-frontend-port \
+        ollama ollama-pull
+
+# ── Install ───────────────────────────────────────────────────────────────────
 
 setup: backend-install frontend-install
 
@@ -13,11 +18,34 @@ backend-install:
 frontend-install:
 	$(NPM_FRONTEND) install
 
+# ── Servers ───────────────────────────────────────────────────────────────────
+
 backend: backend-install
-	$(UV_BACKEND) run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+	$(UV_BACKEND) run uvicorn app.main:app --reload --host 0.0.0.0 --port $(BACKEND_PORT)
 
 frontend: frontend-install
 	$(NPM_FRONTEND) run dev
+
+# ── Ollama ────────────────────────────────────────────────────────────────────
+
+ollama:
+	@if pgrep -x ollama > /dev/null; then \
+		echo "Ollama already running"; \
+	else \
+		echo "Starting Ollama..."; \
+		ollama serve & \
+		sleep 2; \
+	fi
+
+ollama-pull: ollama
+	@if ollama list | grep -q "$(LLM_MODEL)"; then \
+		echo "Model $(LLM_MODEL) already downloaded"; \
+	else \
+		echo "Pulling $(LLM_MODEL)..."; \
+		ollama pull $(LLM_MODEL); \
+	fi
+
+# ── Port helpers ──────────────────────────────────────────────────────────────
 
 free-backend-port:
 	@PIDS=$$(lsof -ti tcp:$(BACKEND_PORT)); \
@@ -39,16 +67,14 @@ free-frontend-port:
 
 free-ports: free-backend-port free-frontend-port
 
-ollama:
-	@if pgrep -x ollama > /dev/null; then \
-		echo "Ollama already running"; \
-	else \
-		echo "Starting Ollama..."; \
-		ollama serve & \
-	fi
+# ── Dev (all-in-one) ──────────────────────────────────────────────────────────
 
-dev: free-ports ollama
+dev: free-ports ollama-pull
 	@trap 'kill 0' EXIT; $(MAKE) backend & $(MAKE) frontend & wait
+
+run: dev
+
+# ── Quality ───────────────────────────────────────────────────────────────────
 
 check:
 	$(UV_BACKEND) run python -m compileall app config
