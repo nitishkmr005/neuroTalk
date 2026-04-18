@@ -267,7 +267,7 @@ async def transcribe_stream(websocket: WebSocket) -> None:
         first_sent_end = 0
 
         try:
-            await send_json({"type": "llm_start"})
+            await send_json({"type": "llm_start", "user_text": text})
             async for token in stream_llm_response(text):
                 full_response += token
                 await send_json({"type": "llm_partial", "text": strip_emotion_tags(full_response)})
@@ -346,7 +346,22 @@ async def transcribe_stream(websocket: WebSocket) -> None:
             pending_llm_call = None
             llm_task = asyncio.create_task(run_llm_stream(next_text, next_trigger))
 
+    async def run_welcome() -> None:
+        welcome = settings.welcome_message
+        if not welcome:
+            return
+        await send_json({"type": "tts_start"})
+        try:
+            wav_bytes, sr = await get_tts_service().synthesize(welcome)
+        except Exception as err:
+            logger.warning("request_id={} event=welcome_tts_error error={}", request_id, err)
+            return
+        wav_b64 = base64.b64encode(wav_bytes).decode()
+        await send_json({"type": "tts_audio", "data": wav_b64, "sample_rate": sr, "tts_ms": 0})
+        await send_json({"type": "tts_done"})
+
     await send_json({"type": "ready", "request_id": request_id})
+    asyncio.create_task(run_welcome())
 
     try:
         while True:

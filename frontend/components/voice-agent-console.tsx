@@ -39,6 +39,7 @@ type StreamMessage = {
   type: "ready" | "partial" | "final" | "error" | "llm_start" | "llm_partial" | "llm_final" | "llm_error" | "tts_start" | "tts_audio" | "tts_done";
   request_id?: string;
   text?: string;
+  user_text?: string;
   message?: string;
   timings_ms?: Metrics;
   debug?: DebugInfo;
@@ -377,8 +378,14 @@ export function VoiceAgentConsole() {
 
         if (payload.type === "partial") {
           applyStreamPayload(payload);
-          const uid = activeUserIdRef.current;
-          if (uid && payload.text?.trim()) updateMsg(uid, { text: payload.text });
+          let uid = activeUserIdRef.current;
+          if (!uid && payload.text?.trim()) {
+            uid = crypto.randomUUID();
+            activeUserIdRef.current = uid;
+            setMessages((prev) => [...prev, { id: uid!, role: "user", text: payload.text ?? "", isStreaming: true, isError: false }]);
+          } else if (uid && payload.text?.trim()) {
+            updateMsg(uid, { text: payload.text });
+          }
           startTransition(() => { setMode("thinking"); });
           return;
         }
@@ -400,6 +407,14 @@ export function VoiceAgentConsole() {
         }
 
         if (payload.type === "llm_start") {
+          // Finalize the user bubble for this turn using the transcript that triggered LLM
+          const uid = activeUserIdRef.current;
+          if (uid) {
+            const userText = payload.user_text?.trim();
+            updateMsg(uid, { text: userText || "…", isStreaming: false });
+          }
+          // Null ref so the next partial creates a fresh user bubble for the next turn
+          activeUserIdRef.current = null;
           const aid = crypto.randomUUID();
           activeAssistantIdRef.current = aid;
           setMessages((prev) => [...prev, { id: aid, role: "assistant", text: "", isStreaming: true, isError: false }]);

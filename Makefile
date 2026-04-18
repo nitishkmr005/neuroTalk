@@ -2,7 +2,7 @@ UV_BACKEND    = uv --directory backend
 NPM_FRONTEND  = npm --prefix frontend
 BACKEND_PORT  = 8000
 FRONTEND_PORT = 3000
-LLM_MODEL     = gemma4:latest
+LLM_MODEL     = gemma3:1b
 TTS_BACKEND  ?= kokoro
 
 .PHONY: setup backend-install frontend-install backend frontend dev run \

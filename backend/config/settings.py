@@ -25,20 +25,25 @@ class Settings(BaseSettings):
     stt_beam_size: int = 1
     stt_vad_filter: bool = True
     stt_language: str = ""
-    stream_emit_interval_ms: int = 1200
-    stream_min_audio_ms: int = 900
+    # How often to emit a partial STT result (ms). Lower = faster LLM trigger.
+    stream_emit_interval_ms: int = 800
+    # Minimum audio buffer before emitting (ms). Lower = faster, but more empty results.
+    stream_min_audio_ms: int = 600
     stream_llm_min_chars: int = 8
 
     temp_dir: Path = Path(".cache/audio")
 
     # TTS backend — controls which dependency group is installed
-    # Supported: chatterbox | qwen | vibevoice | omnivoice
+    # Supported: kokoro | chatterbox | qwen | vibevoice | omnivoice
     tts_backend: str = "kokoro"
+    # Spoken greeting when a session starts. Set to "" to disable.
+    welcome_message: str = "Hello! I'm your Neurotalk voice assistant. How can I assist you today ?"
 
     # LLM — Ollama
     ollama_host: str = "http://localhost:11434"
-    llm_model: str = "gemma4:latest"
-    llm_max_tokens: int = 150
+    # gemma3:1b  — fast, low memory  |  gemma4:latest  — higher quality
+    llm_model: str = "gemma3:1b"
+    llm_max_tokens: int = 100
     llm_system_prompt: str = VOICE_AGENT_PROMPT
 
     @property
