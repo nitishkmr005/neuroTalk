@@ -46,39 +46,33 @@ const modeConfig: Record<
   }
 > = {
   listening: {
-    eyebrow: "Microphone stream open",
-    headline: "Listening and transcribing while you speak.",
+    eyebrow: "Live conversation in progress",
+    headline: "Listening to the conversation as it happens.",
     summary:
-      "The browser streams raw PCM audio over WebSocket. Partial transcript updates appear during the live session instead of only after you stop.",
+      "The assistant is capturing the call in real time so associates can follow the conversation without losing context.",
     accent: "active-listening",
   },
   thinking: {
-    eyebrow: "Live transcription running",
-    headline: "Refreshing the transcript from the growing audio buffer.",
+    eyebrow: "Transcript updating",
+    headline: "Refreshing the live conversation view.",
     summary:
-      "The backend rewrites the current PCM buffer to WAV, runs faster-whisper, and returns updated text plus latency metrics on a timed interval.",
+      "The transcript is being updated continuously to help associates track customer intent, details, and phrasing.",
     accent: "deep-reasoning",
   },
   responding: {
-    eyebrow: "Final transcript returned",
-    headline: "Review the transcript, signal, and runtime trace.",
+    eyebrow: "Conversation captured",
+    headline: "Review the latest conversation transcript.",
     summary:
-      "When you stop the microphone, the backend performs one final pass and returns the latest transcript, request id, and timing values for debugging.",
+      "When the session stops, the assistant finalizes the latest transcript so associates can review the call clearly.",
     accent: "voice-delivery",
   },
 };
 
 const orchestrationSteps = [
-  { label: "PCM capture", detail: "Web Audio collects mono microphone samples and converts them to 16-bit PCM.", status: "online" },
-  { label: "WebSocket stream", detail: "Chunks are sent continuously to the backend while the microphone is active.", status: "online" },
-  { label: "Incremental STT", detail: "faster-whisper re-transcribes the growing buffer on a fixed cadence.", status: "stable" },
-  { label: "Debug telemetry", detail: "Every partial result includes latency and request details for fast diagnosis.", status: "online" },
-];
-
-const runtimeNotes = [
-  { name: "Run both apps", tone: "Use `make dev` to start the backend and frontend together in one command." },
-  { name: "Small / CPU", tone: "Good initial model for simple local development and easier iteration on the pipeline." },
-  { name: "Buffered updates", tone: "This is near-real-time incremental transcription, not token-by-token streaming." },
+  { label: "Live listening", detail: "Captures the ongoing conversation while the associate is speaking with the customer.", status: "online" },
+  { label: "Transcript stream", detail: "Updates the written conversation view during the call instead of waiting for the end.", status: "online" },
+  { label: "Audio health", detail: "Shows whether the current voice input is strong, quiet, or inactive.", status: "stable" },
+  { label: "Conversation review", detail: "Keeps the latest transcript ready for confirmation, notes, and follow-up.", status: "online" },
 ];
 
 const waveformHeights = [28, 46, 32, 64, 24, 58, 38, 72, 44, 30, 66, 35, 54, 26, 60, 40];
@@ -425,11 +419,11 @@ export function VoiceAgentConsole() {
       <section className="console-frame">
         <header className="topbar surface">
           <div>
-            <p className="kicker">NeuroTalk / Sovereign Voice Agent</p>
-            <h1>Realtime Voice Intelligence Console.</h1>
+            <p className="kicker">NeuroTalk / Associate Assist</p>
+            <h1>Live Conversation Assist Console.</h1>
           </div>
           <div className="topbar-meta">
-            <span className="status-pill is-live">Realtime STT stream</span>
+            <span className="status-pill is-live">Live call support</span>
             <span className="status-pill">{websocketUrl}</span>
           </div>
         </header>
@@ -493,12 +487,12 @@ export function VoiceAgentConsole() {
               <div className="control-hints">
                 <span>
                   {isRecording
-                    ? "Microphone is active and PCM chunks are streaming"
+                    ? "The conversation is being captured live"
                     : isFinalizing
-                      ? "Waiting for the final transcript pass"
-                      : "Ready to open a live WebSocket transcription session"}
+                      ? "Finalizing the latest conversation transcript"
+                      : "Ready to start a live conversation capture"}
                 </span>
-                <span>{error ?? "Partial transcript updates will appear while you speak"}</span>
+                <span>{error ?? "Transcript updates will appear during the conversation"}</span>
               </div>
             </div>
 
@@ -519,24 +513,24 @@ export function VoiceAgentConsole() {
           <aside className="telemetry-stack">
             <article className="surface telemetry-panel">
               <div className="section-heading">
-                <p className="kicker">Live Signal Diagnostics</p>
+                <p className="kicker">Audio Health</p>
                 <span className="mini-dot" />
               </div>
               <div className="metric-grid">
                 <div>
-                  <span>Total latency</span>
+                  <span>Processing time</span>
                   <strong>{formatSeconds(metrics?.total_ms)}</strong>
                 </div>
                 <div>
-                  <span>Model load</span>
+                  <span>Model status</span>
                   <strong>{formatSeconds(metrics?.model_load_ms, { cachedWhenZero: true })}</strong>
                 </div>
                 <div>
-                  <span>Transcribe time</span>
+                  <span>Transcript refresh</span>
                   <strong>{formatSeconds(metrics?.transcribe_ms)}</strong>
                 </div>
                 <div>
-                  <span>Client session</span>
+                  <span>Session duration</span>
                   <strong>{formatSeconds(metrics?.client_roundtrip_ms)}</strong>
                 </div>
               </div>
@@ -558,15 +552,15 @@ export function VoiceAgentConsole() {
 
             <article className="surface transcript-panel">
               <div className="section-heading">
-                <p className="kicker">Transcribed text</p>
-                <span className="status-pill is-ghost">{error ? "Error state" : isRecording ? "Live partials" : "Latest result"}</span>
+                <p className="kicker">Conversation Transcript</p>
+                <span className="status-pill is-ghost">{error ? "Attention needed" : isRecording ? "Live capture" : "Latest capture"}</span>
               </div>
               <div className="transcript-stage">
-                <p className="transcript-label">Live transcript</p>
+                <p className="transcript-label">Conversation text</p>
                 <p className="transcript-line">{transcript}</p>
               </div>
               <div className="transcript-footer">
-                <span className="transcript-meta">{error ?? `Request ID: ${debugInfo?.request_id ?? "--"}`}</span>
+                <span className="transcript-meta">{error ?? `Reference ID: ${debugInfo?.request_id ?? "--"}`}</span>
                 <span className="transcript-meta">Language: {debugInfo?.detected_language ?? "--"}</span>
               </div>
             </article>
@@ -576,8 +570,8 @@ export function VoiceAgentConsole() {
         <section className="dashboard-grid">
           <article className="surface stack-panel">
             <div className="section-heading">
-              <p className="kicker">Streaming stack</p>
-              <span className="section-note">Minimal live path with current backend</span>
+              <p className="kicker">Associate Workflow</p>
+              <span className="section-note">Built for live customer conversations</span>
             </div>
             <div className="stack-list">
               {orchestrationSteps.map((step) => (
@@ -594,8 +588,8 @@ export function VoiceAgentConsole() {
 
           <article className="surface insights-panel">
             <div className="section-heading">
-              <p className="kicker">Latency profile</p>
-              <span className="section-note">Useful for tuning stream cadence and model choice</span>
+              <p className="kicker">Call Performance</p>
+              <span className="section-note">System timing during the current conversation</span>
             </div>
             <div className="card-grid">
               {latencyCards.map((card) => (
@@ -605,31 +599,6 @@ export function VoiceAgentConsole() {
                   <p>{card.detail}</p>
                 </div>
               ))}
-            </div>
-          </article>
-
-          <article className="surface presets-panel">
-            <div className="section-heading">
-              <p className="kicker">Runtime notes</p>
-              <span className="section-note">Simple operational guidance for the current implementation</span>
-            </div>
-            <div className="preset-list">
-              {runtimeNotes.map((item) => (
-                <div className="preset-card" key={item.name}>
-                  <h3>{item.name}</h3>
-                  <p>{item.tone}</p>
-                </div>
-              ))}
-            </div>
-            <div className="debug-strip">
-              <span>Buffered: {formatSeconds(metrics?.buffered_audio_ms)}</span>
-              <span>Chunks: {debugInfo?.chunks_received ?? "--"}</span>
-              <span>Bytes: {debugInfo?.audio_bytes ?? "--"}</span>
-              <span>Read: {formatSeconds(metrics?.request_read_ms)}</span>
-              <span>Write: {formatSeconds(metrics?.file_write_ms)}</span>
-              <span>Model: {debugInfo ? `${debugInfo.model_size} / ${debugInfo.device} / ${debugInfo.compute_type}` : "--"}</span>
-              <span>Sample rate: {debugInfo?.sample_rate ?? "--"}</span>
-              <span>Amplitude: {(amplitude * 100).toFixed(0)}%</span>
             </div>
           </article>
         </section>
