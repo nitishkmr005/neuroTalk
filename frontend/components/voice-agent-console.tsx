@@ -131,10 +131,7 @@ function formatSeconds(valueMs: number | null | undefined, options?: { cachedWhe
 }
 
 export function VoiceAgentConsole() {
-  const [isDark, setIsDark] = useState(() => {
-    if (typeof window === "undefined") return true;
-    return localStorage.getItem("nt-theme") !== "light";
-  });
+  const [isDark, setIsDark] = useState(true);
   const [mode, setMode] = useState<Mode>("listening");
   const [isRecording, setIsRecording] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
@@ -174,7 +171,9 @@ export function VoiceAgentConsole() {
 
   useEffect(() => {
     const saved = localStorage.getItem("nt-theme");
-    document.documentElement.setAttribute("data-theme", saved === "light" ? "light" : "dark");
+    const dark = saved !== "light";
+    setIsDark(dark);
+    document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");
   }, []);
 
   const toggleTheme = () => {
@@ -452,7 +451,7 @@ export function VoiceAgentConsole() {
             interruptSentRef.current = false;
             bargeinFrameCountRef.current = 0;
             source.onended = () => { ttsSourceRef.current = null; };
-            source.start();
+            void audioCtx.resume().then(() => { source.start(); });
           });
           return;
         }
