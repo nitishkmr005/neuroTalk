@@ -90,7 +90,7 @@ const orchestrationSteps = [
   { label: "Live Audio Capture", detail: "PCM audio streamed in real-time over WebSocket to the backend.", status: "online" },
   { label: "Incremental Transcription", detail: "faster-whisper transcribes audio incrementally with VAD filtering.", status: "online" },
   { label: "Response Generation", detail: "Ollama (llama3.2) responds to the transcript as speech is detected.", status: "online" },
-  { label: "Voice Playback", detail: "Voice synthesis — coming soon to complete the full voice loop.", status: "pending" },
+  { label: "Voice Playback", detail: "Chatterbox Turbo synthesises AI replies and streams audio to the browser.", status: "online" },
 ];
 
 const waveformHeights = [28, 46, 32, 64, 24, 58, 38, 72, 44, 30, 66, 35, 54, 26, 60, 40];
@@ -559,15 +559,21 @@ export function VoiceAgentConsole() {
     },
     {
       title: "TTS",
-      label: "Voice Playback",
-      value: "--",
-      detail: "Voice synthesis latency — coming soon.",
+      label: "Voice Synthesis",
+      value: formatSeconds(ttsLatencyMs),
+      detail: "Chatterbox Turbo synthesis time for the last AI reply.",
     },
     {
       title: "E2E",
       label: "Turn Latency",
-      value: formatSeconds(metrics?.total_ms != null && llmLatencyMs != null ? metrics.total_ms + llmLatencyMs : (metrics?.total_ms ?? null)),
-      detail: "Combined STT + LLM pipeline time for the last session.",
+      value: formatSeconds(
+        metrics?.total_ms != null && llmLatencyMs != null && ttsLatencyMs != null
+          ? metrics.total_ms + llmLatencyMs + ttsLatencyMs
+          : metrics?.total_ms != null && llmLatencyMs != null
+            ? metrics.total_ms + llmLatencyMs
+            : metrics?.total_ms ?? null
+      ),
+      detail: "Combined STT + LLM + TTS pipeline time for the last session.",
     },
   ];
 
