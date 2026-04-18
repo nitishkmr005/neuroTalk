@@ -196,17 +196,17 @@ async def transcribe_stream(websocket: WebSocket) -> None:
         await send_json({"type": "tts_start"})
         try:
             tts_service = get_tts_service()
-            loop = asyncio.get_event_loop()
 
             if first_sent_task is not None:
                 # Sentence 1 synthesis was started during LLM streaming — await it now
                 wav1, sr1 = await first_sent_task
                 remainder = full_text[first_sent_end:].strip()
                 if remainder and not interrupt_event.is_set():
-                    wav2, sr2 = await loop.run_in_executor(None, tts_service._run_inference, remainder)
-                    # Concatenate: strip WAV header (44 bytes) from part 2, rewrite combined
+                    wav2, sr2 = await tts_service.synthesize(remainder)
+                    # Concatenate: strip 44-byte WAV header from part 2, rewrite combined
                     combined_pcm = wav1[44:] + wav2[44:]
-                    buf = __import__("io").BytesIO()
+                    import io as _io
+                    buf = _io.BytesIO()
                     with wave.open(buf, "wb") as wf:
                         wf.setnchannels(1)
                         wf.setsampwidth(2)
@@ -259,10 +259,7 @@ async def transcribe_stream(websocket: WebSocket) -> None:
                         first_sent_end = m.end()
                         snippet = full_response[:first_sent_end].strip()
                         tts_svc = get_tts_service()
-                        loop = asyncio.get_event_loop()
-                        first_sent_task = asyncio.ensure_future(
-                            loop.run_in_executor(None, tts_svc._run_inference, snippet)
-                        )
+                        first_sent_task = asyncio.ensure_future(tts_svc.synthesize(snippet))
                         logger.info("request_id={} event=tts_early_start snippet_len={}", request_id, len(snippet))
             llm_ms = round((perf_counter() - llm_t0) * 1000, 2)
             logger.info("request_id={} event=llm_done llm_ms={}", request_id, llm_ms)
