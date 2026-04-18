@@ -24,6 +24,12 @@ from config.settings import get_settings
 setup_logging()
 settings = get_settings()
 
+_PAUSE_PATTERN = re.compile(
+    r"^\s*(wait|hold on|hold up|one moment|one sec(?:ond)?|just a (?:moment|second|sec)|"
+    r"give me a (?:second|moment|sec)|hang on|please wait|just wait|ok wait)\s*[.!?,]?\s*$",
+    re.IGNORECASE,
+)
+
 app = FastAPI(title=settings.app_name, version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
@@ -339,6 +345,9 @@ async def transcribe_stream(websocket: WebSocket) -> None:
             return
         if normalized_text == latest_llm_input:
             return
+        if _PAUSE_PATTERN.match(normalized_text):
+            logger.info("request_id={} event=pause_command_detected text={}", request_id, normalized_text)
+            return
 
         pending_llm_call = (normalized_text, trigger)
         if llm_task is None or llm_task.done():
@@ -382,6 +391,7 @@ async def transcribe_stream(websocket: WebSocket) -> None:
                 if event_type == "interrupt":
                     logger.info("request_id={} event=interrupt_received", request_id)
                     interrupt_event.set()
+                    pending_llm_call = None
                     if llm_task is not None and not llm_task.done():
                         llm_task.cancel()
                         with suppress(asyncio.CancelledError):
