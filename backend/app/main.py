@@ -1,4 +1,5 @@
 import asyncio
+import base64
 from contextlib import suppress
 import json
 import wave
@@ -13,6 +14,8 @@ from loguru import logger
 from app.models import HealthResponse, TranscriptionResponse
 from app.services.llm import stream_llm_response
 from app.services.stt import get_stt_service
+from app.services.tts import get_tts_service
+from app.utils.emotion import strip_emotion_tags
 from app.utils.session_logger import LLMCallLog, STTRunLog, SessionLog, _iso, write_session_log
 from config.logging import setup_logging
 from config.settings import get_settings
@@ -164,6 +167,7 @@ async def transcribe_stream(websocket: WebSocket) -> None:
     llm_task: asyncio.Task[None] | None = None
     pending_llm_call: tuple[str, str] | None = None
     latest_llm_input = ""
+    interrupt_event = asyncio.Event()
 
     # ── Session log scaffolding ───────────────────────────────────────────────
     session_log = SessionLog(
@@ -182,8 +186,28 @@ async def transcribe_stream(websocket: WebSocket) -> None:
         async with send_lock:
             await websocket.send_json(payload)
 
+    async def synthesize_and_send(text: str) -> None:
+        if interrupt_event.is_set():
+            return
+        tts_t0 = perf_counter()
+        await send_json({"type": "tts_start"})
+        try:
+            tts_service = get_tts_service()
+            wav_bytes, sample_rate = await tts_service.synthesize(text)
+        except Exception as tts_err:
+            logger.warning("request_id={} event=tts_error error={}", request_id, tts_err)
+            return
+        if interrupt_event.is_set():
+            return
+        tts_ms = round((perf_counter() - tts_t0) * 1000, 2)
+        logger.info("request_id={} event=tts_done tts_ms={}", request_id, tts_ms)
+        wav_b64 = base64.b64encode(wav_bytes).decode()
+        await send_json({"type": "tts_audio", "data": wav_b64, "sample_rate": sample_rate, "tts_ms": tts_ms})
+        await send_json({"type": "tts_done"})
+
     async def run_llm_stream(text: str, trigger: str) -> None:
         nonlocal llm_task, pending_llm_call, latest_llm_input
+        interrupt_event.clear()
         llm_t0 = perf_counter()
         call_ts = _iso()
         full_response = ""
@@ -195,10 +219,11 @@ async def transcribe_stream(websocket: WebSocket) -> None:
             await send_json({"type": "llm_start"})
             async for token in stream_llm_response(text):
                 full_response += token
-                await send_json({"type": "llm_partial", "text": full_response})
+                await send_json({"type": "llm_partial", "text": strip_emotion_tags(full_response)})
             llm_ms = round((perf_counter() - llm_t0) * 1000, 2)
             logger.info("request_id={} event=llm_done llm_ms={}", request_id, llm_ms)
-            await send_json({"type": "llm_final", "text": full_response, "llm_ms": llm_ms})
+            display_text = strip_emotion_tags(full_response)
+            await send_json({"type": "llm_final", "text": display_text, "llm_ms": llm_ms})
         except Exception as llm_err:
             llm_ms = round((perf_counter() - llm_t0) * 1000, 2)
             call_error = str(llm_err)
@@ -227,6 +252,9 @@ async def transcribe_stream(websocket: WebSocket) -> None:
                 error=call_error,
             )
         )
+
+        if full_response and call_error is None:
+            await synthesize_and_send(full_response)
 
         if pending_llm_call is None:
             llm_task = None
@@ -270,6 +298,16 @@ async def transcribe_stream(websocket: WebSocket) -> None:
                 if event_type == "start":
                     sample_rate = int(payload.get("sample_rate", 16000))
                     logger.info("request_id={} event=stream_started sample_rate={}", request_id, sample_rate)
+                    continue
+
+                if event_type == "interrupt":
+                    logger.info("request_id={} event=interrupt_received", request_id)
+                    interrupt_event.set()
+                    if llm_task is not None and not llm_task.done():
+                        llm_task.cancel()
+                        with suppress(asyncio.CancelledError):
+                            await llm_task
+                        llm_task = None
                     continue
 
                 if event_type == "stop":
