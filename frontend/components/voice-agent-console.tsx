@@ -94,6 +94,27 @@ function float32ToInt16(input: Float32Array): Int16Array {
   return output;
 }
 
+function getRmsAmplitude(input: Float32Array): number {
+  let sum = 0;
+  for (let index = 0; index < input.length; index += 1) {
+    sum += input[index] * input[index];
+  }
+
+  return Math.sqrt(sum / input.length);
+}
+
+function formatSeconds(valueMs: number | null | undefined, options?: { cachedWhenZero?: boolean }): string {
+  if (valueMs === null || valueMs === undefined) {
+    return "--";
+  }
+
+  if (options?.cachedWhenZero && valueMs <= 0) {
+    return "cached";
+  }
+
+  return `${(valueMs / 1000).toFixed(valueMs >= 1000 ? 2 : 3)} s`;
+}
+
 export function VoiceAgentConsole() {
   const [mode, setMode] = useState<Mode>("listening");
   const [isRecording, setIsRecording] = useState(false);
@@ -103,6 +124,7 @@ export function VoiceAgentConsole() {
   const [error, setError] = useState<string | null>(null);
   const [metrics, setMetrics] = useState<Metrics | null>(null);
   const [debugInfo, setDebugInfo] = useState<DebugInfo | null>(null);
+  const [amplitude, setAmplitude] = useState(0.08);
 
   const websocketRef = useRef<WebSocket | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
@@ -116,6 +138,7 @@ export function VoiceAgentConsole() {
   const receivedFinalRef = useRef(false);
   const normalCloseRef = useRef(false);
   const errorRef = useRef<string | null>(null);
+  const amplitudeRef = useRef(0.08);
 
   useEffect(() => {
     errorRef.current = error;
@@ -128,6 +151,8 @@ export function VoiceAgentConsole() {
     processorNodeRef.current = null;
     sourceNodeRef.current = null;
     gainNodeRef.current = null;
+    amplitudeRef.current = 0.08;
+    setAmplitude(0.08);
 
     mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
     mediaStreamRef.current = null;
@@ -216,6 +241,12 @@ export function VoiceAgentConsole() {
           }
 
           const channelData = event.inputBuffer.getChannelData(0);
+          const rms = getRmsAmplitude(channelData);
+          const nextAmplitude = Math.min(1, Math.max(0.05, rms * 5.2));
+          const smoothedAmplitude = amplitudeRef.current * 0.72 + nextAmplitude * 0.28;
+          amplitudeRef.current = smoothedAmplitude;
+          setAmplitude(smoothedAmplitude);
+
           const pcm16 = float32ToInt16(channelData);
           socket.send(pcm16.buffer);
         };
@@ -353,21 +384,24 @@ export function VoiceAgentConsole() {
   const activeMode = modeConfig[mode];
   const controlLabel = isRecording ? "Stop Streaming" : isConnecting ? "Connecting..." : "Start Live Transcription";
   const controlDisabled = isConnecting || isFinalizing;
+  const orbScale = (1 + amplitude * 0.28).toFixed(3);
+  const orbGlow = (0.35 + amplitude * 0.85).toFixed(3);
+  const orbTilt = `${(amplitude * 14).toFixed(2)}deg`;
 
   const latencyCards = [
     {
       title: "Total latency",
-      value: metrics ? `${metrics.total_ms} ms` : "--",
+      value: formatSeconds(metrics?.total_ms),
       detail: "Per-update backend processing time for the current buffer pass.",
     },
     {
       title: "Buffered audio",
-      value: metrics ? `${metrics.buffered_audio_ms} ms` : "--",
+      value: formatSeconds(metrics?.buffered_audio_ms),
       detail: "How much microphone audio has been accumulated for the current transcript window.",
     },
     {
       title: "Transcribe pass",
-      value: metrics ? `${metrics.transcribe_ms} ms` : "--",
+      value: formatSeconds(metrics?.transcribe_ms),
       detail: "Time spent in faster-whisper for the latest incremental transcription run.",
     },
   ];
@@ -395,7 +429,17 @@ export function VoiceAgentConsole() {
             </div>
 
             <div className="hero-visual">
-              <div className="orbital-core" aria-hidden="true">
+              <div
+                className="orbital-core"
+                aria-hidden="true"
+                style={
+                  {
+                    "--orb-scale": orbScale,
+                    "--orb-glow": orbGlow,
+                    "--orb-tilt": orbTilt,
+                  } as CSSProperties
+                }
+              >
                 <div className="orb-ring orb-ring-1" />
                 <div className="orb-ring orb-ring-2" />
                 <div className="orb-center" />
@@ -404,16 +448,24 @@ export function VoiceAgentConsole() {
 
               <div className="wave-grid" aria-hidden="true">
                 {waveformHeights.map((height, index) => (
-                  <span
-                    className="wave-bar"
-                    key={`${height}-${index}`}
-                    style={
-                      {
-                        "--bar-height": `${height}px`,
-                        "--bar-delay": `${index * 0.08}s`,
-                      } as CSSProperties
-                    }
-                  />
+                  (() => {
+                    const amplitudeBoost = amplitude * (12 + (index % 4) * 7);
+                    const reactiveHeight = height + amplitudeBoost;
+                    const reactiveOpacity = 0.45 + amplitude * 0.55;
+                    return (
+                      <span
+                        className="wave-bar"
+                        key={`${height}-${index}`}
+                        style={
+                          {
+                            "--bar-height": `${reactiveHeight}px`,
+                            "--bar-delay": `${index * 0.08}s`,
+                            "--bar-opacity": reactiveOpacity.toFixed(3),
+                          } as CSSProperties
+                        }
+                      />
+                    );
+                  })()
                 ))}
               </div>
             </div>
@@ -462,19 +514,19 @@ export function VoiceAgentConsole() {
               <div className="metric-grid">
                 <div>
                   <span>Total latency</span>
-                  <strong>{metrics ? `${metrics.total_ms} ms` : "--"}</strong>
+                  <strong>{formatSeconds(metrics?.total_ms)}</strong>
                 </div>
                 <div>
                   <span>Model load</span>
-                  <strong>{metrics ? `${metrics.model_load_ms} ms` : "--"}</strong>
+                  <strong>{formatSeconds(metrics?.model_load_ms, { cachedWhenZero: true })}</strong>
                 </div>
                 <div>
                   <span>Transcribe time</span>
-                  <strong>{metrics ? `${metrics.transcribe_ms} ms` : "--"}</strong>
+                  <strong>{formatSeconds(metrics?.transcribe_ms)}</strong>
                 </div>
                 <div>
                   <span>Client session</span>
-                  <strong>{metrics?.client_roundtrip_ms ? `${metrics.client_roundtrip_ms} ms` : "--"}</strong>
+                  <strong>{formatSeconds(metrics?.client_roundtrip_ms)}</strong>
                 </div>
               </div>
             </article>
@@ -542,13 +594,14 @@ export function VoiceAgentConsole() {
               ))}
             </div>
             <div className="debug-strip">
-              <span>Buffered: {metrics ? `${metrics.buffered_audio_ms} ms` : "--"}</span>
+              <span>Buffered: {formatSeconds(metrics?.buffered_audio_ms)}</span>
               <span>Chunks: {debugInfo?.chunks_received ?? "--"}</span>
               <span>Bytes: {debugInfo?.audio_bytes ?? "--"}</span>
-              <span>Read: {metrics ? `${metrics.request_read_ms} ms` : "--"}</span>
-              <span>Write: {metrics ? `${metrics.file_write_ms} ms` : "--"}</span>
+              <span>Read: {formatSeconds(metrics?.request_read_ms)}</span>
+              <span>Write: {formatSeconds(metrics?.file_write_ms)}</span>
               <span>Model: {debugInfo ? `${debugInfo.model_size} / ${debugInfo.device} / ${debugInfo.compute_type}` : "--"}</span>
               <span>Sample rate: {debugInfo?.sample_rate ?? "--"}</span>
+              <span>Amplitude: {(amplitude * 100).toFixed(0)}%</span>
             </div>
           </article>
         </section>

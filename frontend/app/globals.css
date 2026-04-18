@@ -228,6 +228,9 @@ button {
   aspect-ratio: 1;
   display: grid;
   place-items: center;
+  transform: scale(var(--orb-scale, 1)) rotateX(var(--orb-tilt, 0deg));
+  transition: transform 120ms ease, filter 120ms ease;
+  filter: saturate(calc(0.95 + var(--orb-glow, 0.35)));
 }
 
 .orb-ring,
@@ -261,7 +264,7 @@ button {
     radial-gradient(circle at 35% 30%, rgba(255, 255, 255, 0.88), rgba(255, 255, 255, 0.04) 28%),
     radial-gradient(circle at center, rgba(107, 231, 255, 0.65), rgba(6, 19, 28, 0.14) 68%);
   box-shadow:
-    0 0 70px rgba(107, 231, 255, 0.45),
+    0 0 calc(40px + var(--orb-glow, 0.35) * 50px) rgba(107, 231, 255, 0.45),
     inset 0 0 30px rgba(255, 255, 255, 0.2);
   animation: orb-pulse 3.6s ease-in-out infinite;
 }
@@ -291,6 +294,9 @@ button {
   transform-origin: bottom;
   animation: wave 1.6s ease-in-out infinite;
   animation-delay: var(--bar-delay);
+  opacity: var(--bar-opacity, 0.85);
+  transition: height 100ms ease, opacity 100ms ease, filter 100ms ease;
+  filter: saturate(calc(0.9 + var(--bar-opacity, 0.85)));
 }
 
 .mode-switcher {
