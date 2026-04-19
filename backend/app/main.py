@@ -211,7 +211,10 @@ async def transcribe_stream(websocket: WebSocket) -> None:
 
     async def send_json(payload: dict[str, object]) -> None:
         async with send_lock:
-            await websocket.send_json(payload)
+            try:
+                await websocket.send_json(payload)
+            except (RuntimeError, WebSocketDisconnect):
+                pass
 
     _SENT_BOUNDARY = re.compile(r"[.!?](?:\s|$)")
 
