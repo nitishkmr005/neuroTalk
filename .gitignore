@@ -42,5 +42,6 @@ tsconfig.tsbuildinfo
 *.swo
 
 *.venvs/
+docs/demo-narration.md
 # uv
 # (uv.lock is intentionally tracked)
