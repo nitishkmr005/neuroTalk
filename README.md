@@ -4,6 +4,14 @@ Real-time voice agent console — live speech transcription with AI-assisted res
 
 ![NeuroTalk voice agent console](docs/images/neurotalk-console-preview.png)
 
+## Demo
+
+<video src="docs/NeuroTalk_Social_Media_V2.mp4" controls width="720">
+  Your browser does not support embedded video. <a href="docs/NeuroTalk_Social_Media_V2.mp4">Download the demo</a>.
+</video>
+
+▶ [Watch the demo video](docs/NeuroTalk_Social_Media_V2.mp4)
+
 In the preview above, `Response Generation: 14.16 s` reflects the time the LLM spends generating the reply token by token in real time.
 Because text streaming and voice streaming are synchronized, TTS starts speaking as tokens arrive, so playback overlaps with generation instead of waiting for the full response.
 

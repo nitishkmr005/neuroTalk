@@ -30,18 +30,18 @@ class Settings(BaseSettings):
     stt_beam_size: int = 1
     stt_vad_filter: bool = True
     # Force language (e.g. "en"). Leave empty for auto-detect.
-    stt_language: str = ""
+    stt_language: str = "en"
 
     # ── Streaming / Debounce ──────────────────────────────────────────────────
     # How often to emit a partial STT result (ms). Lower = faster LLM trigger.
-    stream_emit_interval_ms: int = 800
+    stream_emit_interval_ms: int = 700
     # Minimum audio buffer before emitting (ms). Lower = faster, more empty results.
     stream_min_audio_ms: int = 600
     # Minimum transcript length before firing the LLM (chars).
     stream_llm_min_chars: int = 8
     # Silence window before firing the LLM (ms). Lower = more responsive,
     # higher = avoids splitting one utterance into two replies.
-    stream_llm_silence_ms: int = 900
+    stream_llm_silence_ms: int = 700
 
     # ── TTS ───────────────────────────────────────────────────────────────────
     # Backend: kokoro | chatterbox | qwen | vibevoice | omnivoice
@@ -57,7 +57,7 @@ class Settings(BaseSettings):
     #   qwen3:8b   — higher quality, ~2x slower
     #   gemma3:1b  — fastest, minimal memory, lower quality
     #   gemma4:latest — high quality, large (9.6 GB)
-    llm_model: str = "gemma3:1b"
+    llm_model: str = "llama3.2:3b" #"gemma3:1b"
     llm_max_tokens: int = 100
     # Number of user+assistant turn pairs to keep in context.
     llm_max_history_turns: int = 6

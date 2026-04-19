@@ -52,6 +52,10 @@ class SpeechToTextService:
             beam_size=self.settings.stt_beam_size,
             language=self.settings.stt_language or None,
             vad_filter=self.settings.stt_vad_filter,
+            vad_parameters=dict(min_silence_duration_ms=500),
+            no_speech_threshold=0.6,
+            log_prob_threshold=-1.0,
+            condition_on_previous_text=False,
         )
         segment_list = list(segments)
         transcribe_ms = round((perf_counter() - started_at) * 1000, 2)
