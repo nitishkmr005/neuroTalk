@@ -47,6 +47,7 @@ class Settings(BaseSettings):
     # gemma3:1b  — fast, low memory  |  gemma4:latest  — higher quality
     llm_model: str = "gemma3:1b"
     llm_max_tokens: int = 100
+    llm_max_history_turns: int = 6  # number of user+assistant turn pairs to keep
     llm_system_prompt: str = VOICE_AGENT_PROMPT
 
     @property

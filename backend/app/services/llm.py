@@ -6,18 +6,46 @@ from ollama import AsyncClient
 from config.settings import get_settings
 
 
-async def stream_llm_response(transcript: str) -> AsyncGenerator[str, None]:
+async def stream_llm_response(
+    transcript: str,
+    conversation_history: list[dict[str, str]] | None = None,
+) -> AsyncGenerator[str, None]:
+    """
+    Stream the LLM response token-by-token using Ollama.
+
+    Builds the message list as: system prompt → conversation history → current user message.
+
+    Args:
+        transcript: The user's transcribed speech to send as the current user message.
+        conversation_history: Optional list of previous {"role": "user"/"assistant",
+                              "content": "..."} dicts for multi-turn context.
+
+    Returns:
+        An async generator that yields string tokens as they stream from the model.
+
+    Library:
+        ollama (AsyncClient) — streams chat completions from a local Ollama instance.
+    """
     settings = get_settings()
     client = AsyncClient(host=settings.ollama_host)
 
-    logger.info("event=llm_start model={} host={} input_preview={!r}", settings.llm_model, settings.ollama_host, transcript[:60])
+    messages: list[dict[str, str]] = [
+        {"role": "system", "content": settings.llm_system_prompt},
+        *(conversation_history or []),
+        {"role": "user", "content": transcript},
+    ]
+
+    logger.info(
+        "event=llm_start model={} host={} history_turns={} input_preview={!r}",
+        settings.llm_model,
+        settings.ollama_host,
+        len(conversation_history or []) // 2,
+        transcript[:60],
+    )
 
     stream = await client.chat(
         model=settings.llm_model,
-        messages=[
-            {"role": "system", "content": settings.llm_system_prompt},
-            {"role": "user", "content": transcript},
-        ],
+        messages=messages,
         stream=True,
     )
 
