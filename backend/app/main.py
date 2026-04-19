@@ -16,7 +16,7 @@ from app.models import HealthResponse, TranscriptionResponse
 from app.services.llm import stream_llm_response
 from app.services.stt import get_stt_service
 from app.services.tts import get_tts_service
-from app.utils.emotion import strip_emotion_tags
+from app.utils.emotion import strip_emotion_tags, clean_for_tts
 from app.utils.session_logger import LLMCallLog, STTRunLog, SessionLog, _iso, write_session_log
 from config.logging import setup_logging
 from config.settings import get_settings
@@ -196,6 +196,7 @@ async def transcribe_stream(websocket: WebSocket) -> None:
     interrupt_event = asyncio.Event()
     silence_debounce_task: asyncio.Task[None] | None = None
     conversation_history: list[dict[str, str]] = []  # grows each completed turn
+    llm_responded = False  # True once a full response has been delivered this turn
 
     # ── Session log scaffolding ───────────────────────────────────────────────
     session_log = SessionLog(
@@ -260,7 +261,8 @@ async def transcribe_stream(websocket: WebSocket) -> None:
         await send_json({"type": "tts_done"})
 
     async def run_llm_stream(text: str, trigger: str) -> None:
-        nonlocal llm_task, pending_llm_call, latest_llm_input, last_text_sent, chunk_count, last_emit_at
+        nonlocal llm_task, pending_llm_call, latest_llm_input, last_text_sent, chunk_count, last_emit_at, llm_responded
+        llm_responded = False
         # Clear audio buffer — this utterance is captured; next audio is a new turn
         pcm_buffer.clear()
         last_text_sent = ""
@@ -287,7 +289,7 @@ async def transcribe_stream(websocket: WebSocket) -> None:
                     m = _SENT_BOUNDARY.search(full_response)
                     if m and m.end() >= 20:
                         first_sent_end = m.end()
-                        snippet = full_response[:first_sent_end].strip()
+                        snippet = clean_for_tts(full_response[:first_sent_end].strip())
                         tts_svc = get_tts_service()
                         first_sent_task = asyncio.ensure_future(tts_svc.synthesize(snippet))
                         logger.info("request_id={} event=tts_early_start snippet_len={}", request_id, len(snippet))
@@ -329,12 +331,13 @@ async def transcribe_stream(websocket: WebSocket) -> None:
             first_sent_task = None
 
         if full_response and call_error is None:
+            llm_responded = True
             conversation_history.append({"role": "user", "content": text})
             conversation_history.append({"role": "assistant", "content": full_response})
             max_msgs = settings.llm_max_history_turns * 2
             if len(conversation_history) > max_msgs:
                 conversation_history[:] = conversation_history[-max_msgs:]
-            await synthesize_and_send(full_response, first_sent_task, first_sent_end)
+            await synthesize_and_send(clean_for_tts(full_response), first_sent_task, first_sent_end)
 
         if pending_llm_call is None:
             llm_task = None
@@ -385,11 +388,15 @@ async def transcribe_stream(websocket: WebSocket) -> None:
         welcome = settings.welcome_message
         if not welcome:
             return
+        # Create an assistant bubble in the frontend for the welcome text
+        await send_json({"type": "llm_start", "user_text": ""})
+        await send_json({"type": "llm_final", "text": welcome, "llm_ms": 0})
         await send_json({"type": "tts_start"})
         try:
-            wav_bytes, sr = await get_tts_service().synthesize(welcome)
+            wav_bytes, sr = await get_tts_service().synthesize(clean_for_tts(welcome))
         except Exception as err:
             logger.warning("request_id={} event=welcome_tts_error error={}", request_id, err)
+            await send_json({"type": "tts_done"})
             return
         wav_b64 = base64.b64encode(wav_bytes).decode()
         await send_json({"type": "tts_audio", "data": wav_b64, "sample_rate": sr, "tts_ms": 0})
@@ -470,8 +477,10 @@ async def transcribe_stream(websocket: WebSocket) -> None:
                             )
                         )
 
-                        if final_text and session_log.stt_partial_run_count > 0 and final_text.strip() != latest_llm_input:
+                        if final_text and not llm_responded and final_text.strip() != latest_llm_input:
                             schedule_llm_stream(final_text, "final")
+                        elif final_text and llm_responded:
+                            logger.info("request_id={} event=final_llm_skipped reason=already_responded", request_id)
                     else:
                         await send_json(
                             {

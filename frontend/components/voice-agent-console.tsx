@@ -140,6 +140,7 @@ export function VoiceAgentConsole() {
   const [llmLatencyMs, setLlmLatencyMs] = useState<number | null>(null);
   const [ttsLatencyMs, setTtsLatencyMs] = useState<number | null>(null);
   const ttsSourceRef = useRef<AudioBufferSourceNode | null>(null);
+  const ttsAudioReceivedRef = useRef(false); // true once tts_audio arrived for the current turn
   const interruptSentRef = useRef(false);
   const bargeinFrameCountRef = useRef(0);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -244,6 +245,8 @@ export function VoiceAgentConsole() {
 
   const startStreaming = async () => {
     try {
+      // Stop any audio still playing from a previous session before starting a new one.
+      stopAudioGraph();
       setError(null);
       setMetrics(null);
       setDebugInfo(null);
@@ -412,23 +415,35 @@ export function VoiceAgentConsole() {
         }
 
         if (payload.type === "llm_start") {
-          // Finalize the user bubble for this turn using the transcript that triggered LLM
           const uid = activeUserIdRef.current;
+          const userText = payload.user_text?.trim();
           if (uid) {
-            const userText = payload.user_text?.trim();
-            updateMsg(uid, { text: userText || "…", isStreaming: false });
+            if (userText) {
+              // Finalize the user bubble with the transcript that triggered this LLM call.
+              updateMsg(uid, { text: userText, isStreaming: false });
+            } else {
+              // No user text (welcome message) — remove the placeholder "Listening…" bubble.
+              setMessages((prev) => prev.filter((m) => m.id !== uid));
+            }
           }
           // Null ref so the next partial creates a fresh user bubble for the next turn
           activeUserIdRef.current = null;
           // Reset the buffered text — bubble will stay on typing indicator until TTS plays
           pendingAssistantTextRef.current = "";
+          ttsAudioReceivedRef.current = false;
           if (revealRafRef.current !== null) {
             cancelAnimationFrame(revealRafRef.current);
             revealRafRef.current = null;
           }
-          const aid = crypto.randomUUID();
-          activeAssistantIdRef.current = aid;
-          setMessages((prev) => [...prev, { id: aid, role: "assistant", text: "", isStreaming: true, isError: false }]);
+          // Reuse existing bubble if present (guards against backend sending llm_start twice).
+          // Otherwise create a fresh one.
+          if (!activeAssistantIdRef.current) {
+            const aid = crypto.randomUUID();
+            activeAssistantIdRef.current = aid;
+            setMessages((prev) => [...prev, { id: aid, role: "assistant", text: "", isStreaming: true, isError: false }]);
+          } else {
+            updateMsg(activeAssistantIdRef.current, { text: "", isStreaming: true, isError: false });
+          }
           return;
         }
 
@@ -469,8 +484,18 @@ export function VoiceAgentConsole() {
           for (let i = 0; i < binaryString.length; i++) bytes[i] = binaryString.charCodeAt(i);
           const audioCtx = audioContextRef.current ?? new AudioContext();
           if (!audioContextRef.current) audioContextRef.current = audioCtx;
+          // Capture synchronously — tts_done may clear these refs before decodeAudioData's
+          // async callback fires, so we snapshot them here while they're still valid.
           const aid = activeAssistantIdRef.current;
+          const fullText = pendingAssistantTextRef.current;
+          ttsAudioReceivedRef.current = true;
           void audioCtx.decodeAudioData(bytes.buffer.slice(0), (buffer) => {
+            // Stop any currently playing TTS before starting the new chunk.
+            if (ttsSourceRef.current) {
+              ttsSourceRef.current.onended = null;
+              ttsSourceRef.current.stop();
+              ttsSourceRef.current = null;
+            }
             const source = audioCtx.createBufferSource();
             source.buffer = buffer;
             source.connect(audioCtx.destination);
@@ -478,10 +503,7 @@ export function VoiceAgentConsole() {
             interruptSentRef.current = false;
             bargeinFrameCountRef.current = 0;
 
-            // Progressive reveal: walk pendingAssistantTextRef onto the bubble at a
-            // rate proportional to the audio duration, so the text appears in step
-            // with the spoken voice.
-            const fullText = pendingAssistantTextRef.current;
+            // Progressive reveal: walk text onto the bubble in sync with audio duration.
             const durationMs = Math.max(200, buffer.duration * 1000);
             const startTime = performance.now();
             if (revealRafRef.current !== null) {
@@ -514,9 +536,10 @@ export function VoiceAgentConsole() {
                 cancelAnimationFrame(revealRafRef.current);
                 revealRafRef.current = null;
               }
-              // Snap to full text once playback finishes — protects against rounding drift.
-              if (aid && pendingAssistantTextRef.current) {
-                updateMsg(aid, { text: pendingAssistantTextRef.current, isStreaming: false });
+              // Snap to full text using the captured snapshot — the ref is cleared by
+              // tts_done before onended fires, so we must use the closure value.
+              if (aid && fullText) {
+                updateMsg(aid, { text: fullText, isStreaming: false });
               }
             };
             void audioCtx.resume().then(() => { source.start(); });
@@ -525,13 +548,21 @@ export function VoiceAgentConsole() {
         }
 
         if (payload.type === "tts_done") {
-          // Fallback: if TTS produced no audio (or decode failed), still surface the text.
+          // Fallback: only show full text immediately when no tts_audio was received at all
+          // (backend TTS error). If audio was received, the RAF reveal + onended handle it.
+          // Using ttsSourceRef.current === null is NOT safe because decodeAudioData is async
+          // and the source may not be set yet when tts_done fires.
           const aid = activeAssistantIdRef.current;
-          if (aid && pendingAssistantTextRef.current && ttsSourceRef.current === null) {
+          if (!ttsAudioReceivedRef.current && aid && pendingAssistantTextRef.current) {
             updateMsg(aid, { text: pendingAssistantTextRef.current, isStreaming: false });
           }
+          // Clear so next llm_start creates a fresh bubble rather than reusing this one.
+          activeAssistantIdRef.current = null;
+          pendingAssistantTextRef.current = "";
           startTransition(() => { setMode(isRecordingRef.current ? "listening" : "responding"); });
-          if (!isRecordingRef.current) {
+          // Guard with receivedFinalRef — prevents closing the socket when the welcome
+          // TTS finishes before recording has even started (isRecording is still false then).
+          if (!isRecordingRef.current && receivedFinalRef.current) {
             normalCloseRef.current = true;
             socket.close();
           }
