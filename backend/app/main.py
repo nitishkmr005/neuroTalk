@@ -195,6 +195,7 @@ async def transcribe_stream(websocket: WebSocket) -> None:
     latest_llm_input = ""
     interrupt_event = asyncio.Event()
     silence_debounce_task: asyncio.Task[None] | None = None
+    conversation_history: list[dict[str, str]] = []  # grows each completed turn
 
     # ── Session log scaffolding ───────────────────────────────────────────────
     session_log = SessionLog(
@@ -278,7 +279,7 @@ async def transcribe_stream(websocket: WebSocket) -> None:
 
         try:
             await send_json({"type": "llm_start", "user_text": text})
-            async for token in stream_llm_response(text):
+            async for token in stream_llm_response(text, conversation_history=list(conversation_history)):
                 full_response += token
                 await send_json({"type": "llm_partial", "text": strip_emotion_tags(full_response)})
                 # Fire sentence-1 TTS as soon as first sentence boundary is detected
@@ -328,6 +329,11 @@ async def transcribe_stream(websocket: WebSocket) -> None:
             first_sent_task = None
 
         if full_response and call_error is None:
+            conversation_history.append({"role": "user", "content": text})
+            conversation_history.append({"role": "assistant", "content": full_response})
+            max_msgs = settings.llm_max_history_turns * 2
+            if len(conversation_history) > max_msgs:
+                conversation_history[:] = conversation_history[-max_msgs:]
             await synthesize_and_send(full_response, first_sent_task, first_sent_end)
 
         if pending_llm_call is None:
