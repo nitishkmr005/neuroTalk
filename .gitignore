@@ -38,10 +38,12 @@ tsconfig.tsbuildinfo
 # Editor
 .vscode/
 .idea/
+.claude/
 *.swp
 *.swo
 
 *.venvs/
 docs/demo-narration.md
+AGENTS.md
 # uv
 # (uv.lock is intentionally tracked)
