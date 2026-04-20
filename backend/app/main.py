@@ -18,6 +18,7 @@ from app.services.stt import get_stt_service
 from app.services.tts import get_tts_service
 from app.utils.emotion import strip_emotion_tags, clean_for_tts
 from app.utils.session_logger import LLMCallLog, STTRunLog, SessionLog, _iso, write_session_log
+from app.webrtc.router import router as webrtc_router
 from config.logging import setup_logging
 from config.settings import get_settings
 
@@ -31,6 +32,7 @@ _PAUSE_PATTERN = re.compile(
 )
 
 app = FastAPI(title=settings.app_name, version="0.1.0")
+app.include_router(webrtc_router)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
@@ -219,46 +221,50 @@ async def transcribe_stream(websocket: WebSocket) -> None:
                 pass
 
     _SENT_BOUNDARY = re.compile(r"[.!?](?:\s|$)")
+    # Minimum characters for a sentence fragment to be sent to TTS individually.
+    _MIN_SENTENCE_CHARS = 15
 
-    async def synthesize_and_send(full_text: str, first_sent_task: asyncio.Future | None, first_sent_end: int) -> None:
-        if interrupt_event.is_set():
-            return
+    async def _tts_sentence_pipeline(queue: asyncio.Queue[str | None]) -> None:
+        """
+        Consume sentences from *queue* and synthesise + stream each one immediately.
+
+        Runs concurrently with the LLM token loop so the agent starts speaking
+        as soon as the first sentence boundary is detected — without waiting for
+        the full LLM response to complete.  A ``None`` sentinel signals the end.
+        """
+        tts_service = get_tts_service()
+        tts_started = False
         tts_t0 = perf_counter()
-        await send_json({"type": "tts_start"})
-        try:
-            tts_service = get_tts_service()
 
-            if first_sent_task is not None:
-                # Sentence 1 synthesis was started during LLM streaming — await it now
-                wav1, sr1 = await first_sent_task
-                remainder = full_text[first_sent_end:].strip()
-                if remainder and not interrupt_event.is_set():
-                    wav2, sr2 = await tts_service.synthesize(remainder)
-                    # Concatenate: strip 44-byte WAV header from part 2, rewrite combined
-                    combined_pcm = wav1[44:] + wav2[44:]
-                    import io as _io
-                    buf = _io.BytesIO()
-                    with wave.open(buf, "wb") as wf:
-                        wf.setnchannels(1)
-                        wf.setsampwidth(2)
-                        wf.setframerate(sr1)
-                        wf.writeframes(combined_pcm)
-                    wav_bytes, sr = buf.getvalue(), sr1
-                else:
-                    wav_bytes, sr = wav1, sr1
-            else:
-                wav_bytes, sr = await tts_service.synthesize(full_text)
+        while True:
+            sentence = await queue.get()
+            if sentence is None or interrupt_event.is_set():
+                break
+            try:
+                wav_bytes, sr = await tts_service.synthesize(sentence)
+            except Exception as tts_err:
+                logger.warning("request_id={} event=tts_error error={}", request_id, tts_err)
+                continue
+            if interrupt_event.is_set():
+                break
+            if not tts_started:
+                tts_started = True
+                tts_t0 = perf_counter()
+                await send_json({"type": "tts_start"})
+            tts_ms = round((perf_counter() - tts_t0) * 1000, 2)
+            wav_b64 = base64.b64encode(wav_bytes).decode()
+            await send_json({
+                "type": "tts_audio",
+                "data": wav_b64,
+                "sample_rate": sr,
+                "tts_ms": tts_ms,
+                "sentence_text": sentence,
+            })
 
-        except Exception as tts_err:
-            logger.warning("request_id={} event=tts_error error={}", request_id, tts_err)
-            return
         if interrupt_event.is_set():
-            return
-        tts_ms = round((perf_counter() - tts_t0) * 1000, 2)
-        logger.info("request_id={} event=tts_done tts_ms={}", request_id, tts_ms)
-        wav_b64 = base64.b64encode(wav_bytes).decode()
-        await send_json({"type": "tts_audio", "data": wav_b64, "sample_rate": sr, "tts_ms": tts_ms})
-        await send_json({"type": "tts_done"})
+            await send_json({"type": "tts_interrupted"})
+        else:
+            await send_json({"type": "tts_done"})
 
     async def run_llm_stream(text: str, trigger: str) -> None:
         nonlocal llm_task, pending_llm_call, latest_llm_input, last_text_sent, chunk_count, last_emit_at, llm_responded
@@ -272,39 +278,58 @@ async def transcribe_stream(websocket: WebSocket) -> None:
         llm_t0 = perf_counter()
         call_ts = _iso()
         full_response = ""
+        processed_chars = 0  # chars already extracted as complete sentences
         llm_ms = 0.0
         call_error: str | None = None
         latest_llm_input = text
 
-        first_sent_task: asyncio.Future | None = None
-        first_sent_end = 0
+        # Sentence queue feeds the TTS pipeline task which runs concurrently.
+        sent_queue: asyncio.Queue[str | None] = asyncio.Queue()
+        tts_task = asyncio.create_task(_tts_sentence_pipeline(sent_queue))
 
         try:
             await send_json({"type": "llm_start", "user_text": text})
             async for token in stream_llm_response(text, conversation_history=list(conversation_history)):
+                if interrupt_event.is_set():
+                    break
                 full_response += token
                 await send_json({"type": "llm_partial", "text": strip_emotion_tags(full_response)})
-                # Fire sentence-1 TTS as soon as first sentence boundary is detected
-                if first_sent_task is None and not interrupt_event.is_set():
-                    m = _SENT_BOUNDARY.search(full_response)
-                    if m and m.end() >= 20:
-                        first_sent_end = m.end()
-                        snippet = clean_for_tts(full_response[:first_sent_end].strip())
-                        tts_svc = get_tts_service()
-                        first_sent_task = asyncio.ensure_future(tts_svc.synthesize(snippet))
-                        logger.info("request_id={} event=tts_early_start snippet_len={}", request_id, len(snippet))
+                # Extract complete sentences from the unprocessed tail and enqueue for TTS
+                tail = full_response[processed_chars:]
+                while True:
+                    m = _SENT_BOUNDARY.search(tail)
+                    if not m or m.end() < _MIN_SENTENCE_CHARS:
+                        break
+                    sentence = clean_for_tts(tail[: m.end()].strip())
+                    if sentence:
+                        await sent_queue.put(sentence)
+                        logger.debug("request_id={} event=sentence_queued len={}", request_id, len(sentence))
+                    processed_chars += m.end()
+                    tail = full_response[processed_chars:]
+
             llm_ms = round((perf_counter() - llm_t0) * 1000, 2)
             logger.info("request_id={} event=llm_done llm_ms={}", request_id, llm_ms)
             display_text = strip_emotion_tags(full_response)
             await send_json({"type": "llm_final", "text": display_text, "llm_ms": llm_ms})
+
         except Exception as llm_err:
             llm_ms = round((perf_counter() - llm_t0) * 1000, 2)
             call_error = str(llm_err)
             logger.warning("request_id={} event=llm_error error={}", request_id, llm_err)
-            try:
+            with suppress(Exception):
                 await send_json({"type": "llm_error", "message": "LLM unavailable — is Ollama running?"})
-            except Exception:
-                pass
+
+        finally:
+            # Enqueue any remaining text fragment, then signal end of stream.
+            if not interrupt_event.is_set() and call_error is None:
+                remaining = clean_for_tts(full_response[processed_chars:].strip())
+                if remaining:
+                    sent_queue.put_nowait(remaining)
+            sent_queue.put_nowait(None)  # sentinel — always delivered
+
+        # Wait for all sentences to be synthesised and sent.
+        with suppress(asyncio.CancelledError):
+            await tts_task
 
         approx_tokens = round(len(full_response.split()) * 1.3) if full_response else 0
         session_log.llm_calls.append(
@@ -326,18 +351,13 @@ async def transcribe_stream(websocket: WebSocket) -> None:
             )
         )
 
-        if first_sent_task is not None and (interrupt_event.is_set() or call_error is not None):
-            first_sent_task.cancel()
-            first_sent_task = None
-
-        if full_response and call_error is None:
+        if full_response and call_error is None and not interrupt_event.is_set():
             llm_responded = True
             conversation_history.append({"role": "user", "content": text})
             conversation_history.append({"role": "assistant", "content": full_response})
             max_msgs = settings.llm_max_history_turns * 2
             if len(conversation_history) > max_msgs:
                 conversation_history[:] = conversation_history[-max_msgs:]
-            await synthesize_and_send(clean_for_tts(full_response), first_sent_task, first_sent_end)
 
         if pending_llm_call is None:
             llm_task = None
@@ -427,13 +447,12 @@ async def transcribe_stream(websocket: WebSocket) -> None:
                     pending_llm_call = None
                     if silence_debounce_task is not None and not silence_debounce_task.done():
                         silence_debounce_task.cancel()
-                        with suppress(asyncio.CancelledError):
-                            await silence_debounce_task
                         silence_debounce_task = None
                     if llm_task is not None and not llm_task.done():
+                        # Fire-and-forget cancel — the tts_pipeline task will see
+                        # interrupt_event and send tts_interrupted itself.  Awaiting
+                        # here would block the receive loop while TTS synthesis finishes.
                         llm_task.cancel()
-                        with suppress(asyncio.CancelledError):
-                            await llm_task
                         llm_task = None
                     continue
 
@@ -448,12 +467,16 @@ async def transcribe_stream(websocket: WebSocket) -> None:
                     if sample_rate and pcm_buffer:
                         audio_duration_ms = round(len(pcm_buffer) / 2 / sample_rate * 1000, 2)
                         audio_file_path = str(settings.temp_dir / f"{request_id}_stream.wav")
-
-                        result_payload = transcribe_stream_buffer(
-                            request_id=request_id,
-                            sample_rate=sample_rate,
-                            pcm_buffer=pcm_buffer,
-                            chunk_count=chunk_count,
+                        _buf_snap = bytearray(pcm_buffer)
+                        _cnt_snap = chunk_count
+                        result_payload = await asyncio.get_event_loop().run_in_executor(
+                            None,
+                            lambda: transcribe_stream_buffer(
+                                request_id=request_id,
+                                sample_rate=sample_rate,
+                                pcm_buffer=_buf_snap,
+                                chunk_count=_cnt_snap,
+                            ),
                         )
                         await send_json({"type": "final", **result_payload})
 
@@ -532,11 +555,16 @@ async def transcribe_stream(websocket: WebSocket) -> None:
             if not should_emit:
                 continue
 
-            result_payload = transcribe_stream_buffer(
-                request_id=request_id,
-                sample_rate=sample_rate,
-                pcm_buffer=pcm_buffer,
-                chunk_count=chunk_count,
+            _buf_snap = bytearray(pcm_buffer)
+            _cnt_snap = chunk_count
+            result_payload = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: transcribe_stream_buffer(
+                    request_id=request_id,
+                    sample_rate=sample_rate,
+                    pcm_buffer=_buf_snap,
+                    chunk_count=_cnt_snap,
+                ),
             )
             current_text = str(result_payload["text"])
             if current_text != last_text_sent:

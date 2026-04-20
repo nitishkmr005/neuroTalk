@@ -280,8 +280,49 @@ button {
   display: flex;
   flex-wrap: wrap;
   justify-content: flex-end;
+  align-items: center;
   gap: 8px;
   padding-top: 6px;
+}
+
+/* Transport selector (WS / RTC toggle) */
+.transport-toggle {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.transport-btn {
+  padding: 4px 11px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  background: transparent;
+  color: var(--text-muted);
+  border: none;
+  cursor: pointer;
+  transition: background 140ms ease, color 140ms ease;
+}
+
+.transport-btn + .transport-btn {
+  border-left: 1px solid var(--border);
+}
+
+.transport-btn.is-active {
+  background: var(--blue-soft);
+  color: var(--blue);
+}
+
+.transport-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.transport-btn:not(:disabled):not(.is-active):hover {
+  background: var(--surface-2, rgba(255,255,255,0.04));
+  color: var(--text);
 }
 
 .kicker {

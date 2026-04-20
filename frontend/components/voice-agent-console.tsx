@@ -1,6 +1,7 @@
 "use client";
 
 import { Fragment, startTransition, useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
+import { WebRTCTransport } from "./webrtc-transport";
 
 type Mode = "listening" | "thinking" | "responding" | "speaking";
 
@@ -36,7 +37,7 @@ type DebugInfo = {
 };
 
 type StreamMessage = {
-  type: "ready" | "partial" | "final" | "error" | "llm_start" | "llm_partial" | "llm_final" | "llm_error" | "tts_start" | "tts_audio" | "tts_done";
+  type: "ready" | "partial" | "final" | "error" | "llm_start" | "llm_partial" | "llm_final" | "llm_error" | "tts_start" | "tts_audio" | "tts_done" | "tts_interrupted";
   request_id?: string;
   text?: string;
   user_text?: string;
@@ -46,6 +47,7 @@ type StreamMessage = {
   llm_ms?: number;
   data?: string;
   tts_ms?: number;
+  sentence_text?: string;
 };
 
 const modeConfig: Record<
@@ -92,7 +94,7 @@ const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8000
 const websocketUrl = `${backendUrl.replace(/^http/, "ws")}/ws/transcribe`;
 const initialWaveLevels = waveformHeights.map(() => 0.18);
 const BARGE_IN_THRESHOLD = 0.15;
-const BARGE_IN_FRAMES = 2;
+const BARGE_IN_FRAMES = 1;
 
 function float32ToInt16(input: Float32Array): Int16Array {
   const output = new Int16Array(input.length);
@@ -124,8 +126,11 @@ function formatSeconds(valueMs: number | null | undefined, options?: { cachedWhe
   return `${(valueMs / 1000).toFixed(valueMs >= 1000 ? 2 : 3)} s`;
 }
 
+type TransportType = "websocket" | "webrtc";
+
 export function VoiceAgentConsole() {
   const [isDark, setIsDark] = useState(true);
+  const [transportType, setTransportType] = useState<TransportType>("websocket");
   const [mode, setMode] = useState<Mode>("listening");
   const [isRecording, setIsRecording] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
@@ -140,7 +145,7 @@ export function VoiceAgentConsole() {
   const [llmLatencyMs, setLlmLatencyMs] = useState<number | null>(null);
   const [ttsLatencyMs, setTtsLatencyMs] = useState<number | null>(null);
   const ttsSourceRef = useRef<AudioBufferSourceNode | null>(null);
-  const ttsAudioReceivedRef = useRef(false); // true once tts_audio arrived for the current turn
+  const ttsAudioReceivedRef = useRef(false);
   const interruptSentRef = useRef(false);
   const bargeinFrameCountRef = useRef(0);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -150,7 +155,16 @@ export function VoiceAgentConsole() {
   const revealRafRef = useRef<number | null>(null);
   const chatEndRef = useRef<HTMLDivElement | null>(null);
 
+  // Audio queue: sentences arrive one at a time; we play them sequentially.
+  type TtsChunk = { buffer: AudioBuffer; text: string };
+  const ttsQueueRef = useRef<TtsChunk[]>([]);
+  const isTtsPlayingRef = useRef(false);
+  const ttsAllChunksReceivedRef = useRef(false);
+  // Text revealed so far in the current assistant turn (accumulates across chunks).
+  const revealedTextRef = useRef("");
+
   const websocketRef = useRef<WebSocket | null>(null);
+  const webrtcRef = useRef<WebRTCTransport | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const sourceNodeRef = useRef<MediaStreamAudioSourceNode | null>(null);
@@ -214,7 +228,97 @@ export function VoiceAgentConsole() {
       void audioContextRef.current.close();
       audioContextRef.current = null;
     }
+
+    webrtcRef.current?.close();
+    webrtcRef.current = null;
+
+    // Clear audio queue
+    ttsQueueRef.current = [];
+    isTtsPlayingRef.current = false;
+    ttsAllChunksReceivedRef.current = false;
+    revealedTextRef.current = "";
   };
+
+  // Hoisted helper so playNextTtsChunk and message handlers can both call it.
+  const updateMsg = useCallback((id: string, patch: Partial<ChatMessage>) => {
+    setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, ...patch } : m)));
+  }, []);
+
+  const clearTtsQueue = () => {
+    ttsSourceRef.current?.stop();
+    ttsSourceRef.current = null;
+    ttsQueueRef.current = [];
+    isTtsPlayingRef.current = false;
+    ttsAllChunksReceivedRef.current = false;
+    revealedTextRef.current = "";
+    if (revealRafRef.current !== null) {
+      cancelAnimationFrame(revealRafRef.current);
+      revealRafRef.current = null;
+    }
+  };
+
+  const playNextTtsChunk = useCallback(() => {
+    if (ttsQueueRef.current.length === 0) {
+      isTtsPlayingRef.current = false;
+      if (ttsAllChunksReceivedRef.current) {
+        // All sentences played — finalise the assistant bubble.
+        const aid = activeAssistantIdRef.current;
+        const fullText = pendingAssistantTextRef.current;
+        if (aid && fullText) updateMsg(aid, { text: fullText, isStreaming: false });
+        activeAssistantIdRef.current = null;
+        pendingAssistantTextRef.current = "";
+        revealedTextRef.current = "";
+        startTransition(() => { setMode(isRecordingRef.current ? "listening" : "responding"); });
+      }
+      return;
+    }
+
+    const chunk = ttsQueueRef.current.shift()!;
+    const audioCtx = audioContextRef.current ?? new AudioContext();
+    if (!audioContextRef.current) audioContextRef.current = audioCtx;
+
+    const source = audioCtx.createBufferSource();
+    source.buffer = chunk.buffer;
+    source.connect(audioCtx.destination);
+    ttsSourceRef.current = source;
+    interruptSentRef.current = false;
+    bargeinFrameCountRef.current = 0;
+
+    const aid = activeAssistantIdRef.current;
+    const chunkText = chunk.text;
+    const baseText = revealedTextRef.current;
+    const durationMs = Math.max(200, chunk.buffer.duration * 1000);
+    const startTime = performance.now();
+
+    // Reveal just this sentence's text during its playback window.
+    const tick = () => {
+      if (!aid || ttsSourceRef.current !== source) { revealRafRef.current = null; return; }
+      const elapsed = performance.now() - startTime;
+      const progress = Math.min(1, elapsed / durationMs);
+      const partial = chunkText.slice(0, Math.floor(progress * chunkText.length));
+      const visible = baseText ? `${baseText} ${partial}` : partial;
+      updateMsg(aid, { text: visible.trim(), isStreaming: true });
+      if (progress < 1) {
+        revealRafRef.current = requestAnimationFrame(tick);
+      } else {
+        revealRafRef.current = null;
+      }
+    };
+    if (aid && chunkText) revealRafRef.current = requestAnimationFrame(tick);
+
+    source.onended = () => {
+      ttsSourceRef.current = null;
+      if (revealRafRef.current !== null) { cancelAnimationFrame(revealRafRef.current); revealRafRef.current = null; }
+      // Accumulate this sentence into the revealed text baseline.
+      const newBase = baseText ? `${baseText} ${chunkText}` : chunkText;
+      revealedTextRef.current = newBase.trim();
+      if (aid) updateMsg(aid, { text: revealedTextRef.current, isStreaming: true });
+      playNextTtsChunk();
+    };
+
+    isTtsPlayingRef.current = true;
+    void audioCtx.resume().then(() => { source.start(); });
+  }, [updateMsg]);
 
   useEffect(() => {
     return () => {
@@ -273,6 +377,293 @@ export function VoiceAgentConsole() {
       });
       mediaStreamRef.current = stream;
 
+      // ── WebRTC path ────────────────────────────────────────────────────────
+      if (transportType === "webrtc") {
+        const transport = new WebRTCTransport(backendUrl);
+        webrtcRef.current = transport;
+
+        // Shared message handler for WebRTC (same protocol as WebSocket).
+        // Key differences: no socket.close() on tts_done — the session is
+        // persistent; instead we reset to "listening" for the next turn.
+        transport.onMessage = (payload) => {
+          const updateMsg = (id: string, patch: Partial<ChatMessage>) => {
+            setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, ...patch } : m)));
+          };
+
+          if (payload.type === "ready") {
+            streamReadyRef.current = true;
+            const uid = crypto.randomUUID();
+            activeUserIdRef.current = uid;
+            activeAssistantIdRef.current = null;
+            setMessages((prev) => [
+              ...prev,
+              { id: uid, role: "user", text: "Listening…", isStreaming: true, isError: false },
+            ]);
+            if (payload.request_id) {
+              setDebugInfo((current) => ({
+                request_id: String(payload.request_id ?? current?.request_id ?? "--"),
+                filename: current?.filename ?? "stream.wav",
+                audio_bytes: current?.audio_bytes ?? 0,
+                detected_language: current?.detected_language ?? null,
+                segments: current?.segments ?? 0,
+                model_size: current?.model_size ?? "--",
+                device: current?.device ?? "--",
+                compute_type: current?.compute_type ?? "--",
+                sample_rate: current?.sample_rate ?? null,
+                chunks_received: current?.chunks_received ?? null,
+              }));
+            }
+            return;
+          }
+
+          if (payload.type === "partial") {
+            const text = typeof payload.text === "string" ? payload.text : undefined;
+            if (text !== undefined) setTranscript(text || "No speech detected yet.");
+            const timings = payload.timings_ms as Metrics | undefined;
+            if (timings) {
+              setMetrics({
+                ...timings,
+                client_roundtrip_ms:
+                  sessionStartedAtRef.current === null
+                    ? null
+                    : Number((performance.now() - sessionStartedAtRef.current).toFixed(2)),
+              });
+            }
+            if (payload.debug) setDebugInfo(payload.debug as DebugInfo);
+            let uid = activeUserIdRef.current;
+            if (!uid && text?.trim()) {
+              uid = crypto.randomUUID();
+              activeUserIdRef.current = uid;
+              setMessages((prev) => [
+                ...prev,
+                { id: uid!, role: "user", text: text ?? "", isStreaming: true, isError: false },
+              ]);
+            } else if (uid && text?.trim()) {
+              updateMsg(uid, { text });
+            }
+            startTransition(() => { setMode("thinking"); });
+            return;
+          }
+
+          if (payload.type === "final") {
+            receivedFinalRef.current = true;
+            const text = typeof payload.text === "string" ? payload.text : undefined;
+            if (text !== undefined) setTranscript(text || "No speech detected yet.");
+            setIsFinalizing(false);
+            isFinalizingRef.current = false;
+            const uid = activeUserIdRef.current;
+            const finalText = text?.trim() ?? "";
+            if (uid) updateMsg(uid, { text: finalText || "…", isStreaming: false });
+            startTransition(() => { setMode("responding"); });
+            return;
+          }
+
+          if (payload.type === "llm_start") {
+            const uid = activeUserIdRef.current;
+            const userText = typeof payload.user_text === "string" ? payload.user_text.trim() : "";
+            if (uid) {
+              if (userText) {
+                updateMsg(uid, { text: userText, isStreaming: false });
+              } else {
+                setMessages((prev) => prev.filter((m) => m.id !== uid));
+              }
+            }
+            activeUserIdRef.current = null;
+            pendingAssistantTextRef.current = "";
+            ttsAudioReceivedRef.current = false;
+            if (revealRafRef.current !== null) {
+              cancelAnimationFrame(revealRafRef.current);
+              revealRafRef.current = null;
+            }
+            if (!activeAssistantIdRef.current) {
+              const aid = crypto.randomUUID();
+              activeAssistantIdRef.current = aid;
+              setMessages((prev) => [
+                ...prev,
+                { id: aid, role: "assistant", text: "", isStreaming: true, isError: false },
+              ]);
+            } else {
+              updateMsg(activeAssistantIdRef.current, { text: "", isStreaming: true, isError: false });
+            }
+            return;
+          }
+
+          if (payload.type === "llm_partial") {
+            pendingAssistantTextRef.current = typeof payload.text === "string" ? payload.text : "";
+            startTransition(() => { setMode("responding"); });
+            return;
+          }
+
+          if (payload.type === "llm_final") {
+            pendingAssistantTextRef.current = typeof payload.text === "string" ? payload.text : "";
+            if (payload.llm_ms != null) setLlmLatencyMs(Number(payload.llm_ms));
+            startTransition(() => { setMode("listening"); });
+            return;
+          }
+
+          if (payload.type === "llm_error") {
+            const aid = activeAssistantIdRef.current;
+            if (aid)
+              updateMsg(aid, {
+                text: "AI unavailable — make sure Ollama is running.",
+                isStreaming: false,
+                isError: true,
+              });
+            return;
+          }
+
+          if (payload.type === "tts_start") {
+            ttsQueueRef.current = [];
+            isTtsPlayingRef.current = false;
+            ttsAllChunksReceivedRef.current = false;
+            revealedTextRef.current = "";
+            ttsAudioReceivedRef.current = false;
+            startTransition(() => { setMode("speaking"); });
+            return;
+          }
+
+          if (payload.type === "tts_audio") {
+            if (payload.tts_ms != null) setTtsLatencyMs(Number(payload.tts_ms));
+            const sentenceText = typeof payload.sentence_text === "string" ? payload.sentence_text : (pendingAssistantTextRef.current ?? "");
+            const data = typeof payload.data === "string" ? payload.data : "";
+            const binaryString = atob(data);
+            const bytes = new Uint8Array(binaryString.length);
+            for (let i = 0; i < binaryString.length; i++) bytes[i] = binaryString.charCodeAt(i);
+            const audioCtx = audioContextRef.current ?? new AudioContext();
+            if (!audioContextRef.current) audioContextRef.current = audioCtx;
+            ttsAudioReceivedRef.current = true;
+            void audioCtx.decodeAudioData(bytes.buffer.slice(0), (buffer) => {
+              ttsQueueRef.current.push({ buffer, text: sentenceText });
+              if (!isTtsPlayingRef.current) playNextTtsChunk();
+            });
+            return;
+          }
+
+          if (payload.type === "tts_done") {
+            ttsAllChunksReceivedRef.current = true;
+            if (!ttsAudioReceivedRef.current) {
+              const aid = activeAssistantIdRef.current;
+              if (aid && pendingAssistantTextRef.current) {
+                updateMsg(aid, { text: pendingAssistantTextRef.current, isStreaming: false });
+              }
+              activeAssistantIdRef.current = null;
+              pendingAssistantTextRef.current = "";
+              revealedTextRef.current = "";
+            } else if (!isTtsPlayingRef.current && ttsQueueRef.current.length === 0) {
+              const aid = activeAssistantIdRef.current;
+              if (aid) updateMsg(aid, { text: pendingAssistantTextRef.current, isStreaming: false });
+              activeAssistantIdRef.current = null;
+              pendingAssistantTextRef.current = "";
+              revealedTextRef.current = "";
+            }
+            // Persistent WebRTC: reset for next turn after playback finishes.
+            // playNextTtsChunk's finalise path will handle the "still playing" case.
+            if (!isTtsPlayingRef.current && ttsQueueRef.current.length === 0) {
+              receivedFinalRef.current = false;
+              const freshUid = crypto.randomUUID();
+              activeUserIdRef.current = freshUid;
+              setMessages((prev) => [
+                ...prev,
+                { id: freshUid, role: "user", text: "Listening…", isStreaming: true, isError: false },
+              ]);
+              startTransition(() => { setMode("listening"); });
+            }
+            return;
+          }
+
+          if (payload.type === "tts_interrupted") {
+            clearTtsQueue();
+            startTransition(() => { setMode("listening"); });
+            return;
+          }
+
+          if (payload.type === "error") {
+            const message = typeof payload.message === "string"
+              ? payload.message
+              : "Streaming transcription failed.";
+            errorRef.current = message;
+            setError(message);
+            setIsFinalizing(false);
+            isFinalizingRef.current = false;
+            startTransition(() => { setMode("listening"); });
+          }
+        };
+
+        transport.onClose = () => {
+          streamReadyRef.current = false;
+          webrtcRef.current = null;
+          setIsConnecting(false);
+          setIsRecording(false);
+          isRecordingRef.current = false;
+          if (!errorRef.current) stopAudioGraph();
+        };
+
+        try {
+          await transport.connect(stream);
+        } catch (connectErr) {
+          const msg =
+            connectErr instanceof Error ? connectErr.message : "WebRTC connection failed.";
+          errorRef.current = msg;
+          setError(msg);
+          setIsConnecting(false);
+          setIsRecording(false);
+          setIsFinalizing(false);
+          stopAudioGraph();
+          return;
+        }
+
+        // ScriptProcessor: amplitude visualisation + client-side barge-in detection.
+        // Audio is NOT sent as binary — it travels via the RTP track added in connect().
+        const rtcAudioCtx = new AudioContext();
+        audioContextRef.current = rtcAudioCtx;
+        const rtcSource = rtcAudioCtx.createMediaStreamSource(stream);
+        const rtcProcessor = rtcAudioCtx.createScriptProcessor(2048, 1, 1);
+        const rtcGain = rtcAudioCtx.createGain();
+        rtcGain.gain.value = 0;
+        rtcSource.connect(rtcProcessor);
+        rtcProcessor.connect(rtcGain);
+        rtcGain.connect(rtcAudioCtx.destination);
+        sourceNodeRef.current = rtcSource;
+        processorNodeRef.current = rtcProcessor;
+        gainNodeRef.current = rtcGain;
+
+        rtcProcessor.onaudioprocess = (event) => {
+          const channelData = event.inputBuffer.getChannelData(0);
+          const rms = getRmsAmplitude(channelData);
+          const nextAmplitude = Math.min(1, Math.max(0.04, rms * 11.5));
+          const smoothed = amplitudeRef.current * 0.58 + nextAmplitude * 0.42;
+          amplitudeRef.current = smoothed;
+          setAmplitude(smoothed);
+          const nextBars = [...waveLevelsRef.current.slice(1), smoothed];
+          waveLevelsRef.current = nextBars;
+          setWaveLevels(nextBars);
+
+          // Client-side barge-in (complements server-side VAD in session.py)
+          if ((ttsSourceRef.current || ttsQueueRef.current.length > 0) && !interruptSentRef.current) {
+            if (rms > BARGE_IN_THRESHOLD) {
+              bargeinFrameCountRef.current += 1;
+              if (bargeinFrameCountRef.current >= BARGE_IN_FRAMES) {
+                interruptSentRef.current = true;
+                clearTtsQueue();
+                transport.send({ type: "interrupt" });
+                startTransition(() => { setMode("listening"); });
+              }
+            } else {
+              bargeinFrameCountRef.current = 0;
+            }
+          }
+          // No binary send here — audio travels via the RTP track.
+        };
+
+        transport.send({ type: "start", sample_rate: rtcAudioCtx.sampleRate });
+        setIsConnecting(false);
+        setIsRecording(true);
+        isRecordingRef.current = true;
+        startTransition(() => { setMode("listening"); });
+        return;
+      }
+      // ── End WebRTC path ────────────────────────────────────────────────────
+
       const socket = new WebSocket(websocketUrl);
       socket.binaryType = "arraybuffer";
       websocketRef.current = socket;
@@ -284,7 +675,7 @@ export function VoiceAgentConsole() {
         audioContextRef.current = audioContext;
 
         const sourceNode = audioContext.createMediaStreamSource(stream);
-        const processorNode = audioContext.createScriptProcessor(4096, 1, 1);
+        const processorNode = audioContext.createScriptProcessor(2048, 1, 1);
         const gainNode = audioContext.createGain();
         gainNode.gain.value = 0;
 
@@ -312,17 +703,12 @@ export function VoiceAgentConsole() {
           waveLevelsRef.current = nextBars;
           setWaveLevels(nextBars);
 
-          if (ttsSourceRef.current && !interruptSentRef.current) {
+          if ((ttsSourceRef.current || ttsQueueRef.current.length > 0) && !interruptSentRef.current) {
             if (rms > BARGE_IN_THRESHOLD) {
               bargeinFrameCountRef.current += 1;
               if (bargeinFrameCountRef.current >= BARGE_IN_FRAMES) {
                 interruptSentRef.current = true;
-                ttsSourceRef.current.stop();
-                ttsSourceRef.current = null;
-                if (revealRafRef.current !== null) {
-                  cancelAnimationFrame(revealRafRef.current);
-                  revealRafRef.current = null;
-                }
+                clearTtsQueue();
                 if (socket.readyState === WebSocket.OPEN) {
                   socket.send(JSON.stringify({ type: "interrupt" }));
                 }
@@ -354,11 +740,6 @@ export function VoiceAgentConsole() {
 
       socket.onmessage = (event) => {
         const payload = JSON.parse(event.data) as StreamMessage;
-
-        // ── helpers ──────────────────────────────────────────────────────────
-        const updateMsg = (id: string, patch: Partial<ChatMessage>) => {
-          setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, ...patch } : m)));
-        };
 
         if (payload.type === "ready") {
           streamReadyRef.current = true;
@@ -473,99 +854,69 @@ export function VoiceAgentConsole() {
         }
 
         if (payload.type === "tts_start") {
+          // Reset queue state for this new TTS turn.
+          ttsQueueRef.current = [];
+          isTtsPlayingRef.current = false;
+          ttsAllChunksReceivedRef.current = false;
+          revealedTextRef.current = "";
+          ttsAudioReceivedRef.current = false;
           startTransition(() => { setMode("speaking"); });
           return;
         }
 
         if (payload.type === "tts_audio") {
           if (payload.tts_ms != null) setTtsLatencyMs(payload.tts_ms);
+          const sentenceText = payload.sentence_text ?? pendingAssistantTextRef.current;
           const binaryString = atob(payload.data ?? "");
           const bytes = new Uint8Array(binaryString.length);
           for (let i = 0; i < binaryString.length; i++) bytes[i] = binaryString.charCodeAt(i);
           const audioCtx = audioContextRef.current ?? new AudioContext();
           if (!audioContextRef.current) audioContextRef.current = audioCtx;
-          // Capture synchronously — tts_done may clear these refs before decodeAudioData's
-          // async callback fires, so we snapshot them here while they're still valid.
-          const aid = activeAssistantIdRef.current;
-          const fullText = pendingAssistantTextRef.current;
           ttsAudioReceivedRef.current = true;
           void audioCtx.decodeAudioData(bytes.buffer.slice(0), (buffer) => {
-            // Stop any currently playing TTS before starting the new chunk.
-            if (ttsSourceRef.current) {
-              ttsSourceRef.current.onended = null;
-              ttsSourceRef.current.stop();
-              ttsSourceRef.current = null;
-            }
-            const source = audioCtx.createBufferSource();
-            source.buffer = buffer;
-            source.connect(audioCtx.destination);
-            ttsSourceRef.current = source;
-            interruptSentRef.current = false;
-            bargeinFrameCountRef.current = 0;
-
-            // Progressive reveal: walk text onto the bubble in sync with audio duration.
-            const durationMs = Math.max(200, buffer.duration * 1000);
-            const startTime = performance.now();
-            if (revealRafRef.current !== null) {
-              cancelAnimationFrame(revealRafRef.current);
-              revealRafRef.current = null;
-            }
-            const tick = () => {
-              if (!aid || ttsSourceRef.current !== source) {
-                revealRafRef.current = null;
-                return;
-              }
-              const elapsed = performance.now() - startTime;
-              const progress = Math.min(1, elapsed / durationMs);
-              const revealedChars = Math.floor(progress * fullText.length);
-              const visible = fullText.slice(0, revealedChars);
-              updateMsg(aid, { text: visible, isStreaming: progress < 1 });
-              if (progress < 1) {
-                revealRafRef.current = requestAnimationFrame(tick);
-              } else {
-                revealRafRef.current = null;
-              }
-            };
-            if (aid && fullText) {
-              revealRafRef.current = requestAnimationFrame(tick);
-            }
-
-            source.onended = () => {
-              ttsSourceRef.current = null;
-              if (revealRafRef.current !== null) {
-                cancelAnimationFrame(revealRafRef.current);
-                revealRafRef.current = null;
-              }
-              // Snap to full text using the captured snapshot — the ref is cleared by
-              // tts_done before onended fires, so we must use the closure value.
-              if (aid && fullText) {
-                updateMsg(aid, { text: fullText, isStreaming: false });
-              }
-            };
-            void audioCtx.resume().then(() => { source.start(); });
+            ttsQueueRef.current.push({ buffer, text: sentenceText });
+            if (!isTtsPlayingRef.current) playNextTtsChunk();
           });
           return;
         }
 
         if (payload.type === "tts_done") {
-          // Fallback: only show full text immediately when no tts_audio was received at all
-          // (backend TTS error). If audio was received, the RAF reveal + onended handle it.
-          // Using ttsSourceRef.current === null is NOT safe because decodeAudioData is async
-          // and the source may not be set yet when tts_done fires.
-          const aid = activeAssistantIdRef.current;
-          if (!ttsAudioReceivedRef.current && aid && pendingAssistantTextRef.current) {
-            updateMsg(aid, { text: pendingAssistantTextRef.current, isStreaming: false });
+          ttsAllChunksReceivedRef.current = true;
+          if (!ttsAudioReceivedRef.current) {
+            // TTS produced nothing (error path) — show the LLM text directly.
+            const aid = activeAssistantIdRef.current;
+            if (aid && pendingAssistantTextRef.current) {
+              updateMsg(aid, { text: pendingAssistantTextRef.current, isStreaming: false });
+            }
+            activeAssistantIdRef.current = null;
+            pendingAssistantTextRef.current = "";
+            revealedTextRef.current = "";
+            startTransition(() => { setMode(isRecordingRef.current ? "listening" : "responding"); });
+            if (!isRecordingRef.current && receivedFinalRef.current) {
+              normalCloseRef.current = true;
+              socket.close();
+            }
+          } else if (!isTtsPlayingRef.current && ttsQueueRef.current.length === 0) {
+            // All audio already finished playing before tts_done arrived.
+            const aid = activeAssistantIdRef.current;
+            if (aid) updateMsg(aid, { text: pendingAssistantTextRef.current, isStreaming: false });
+            activeAssistantIdRef.current = null;
+            pendingAssistantTextRef.current = "";
+            revealedTextRef.current = "";
+            startTransition(() => { setMode(isRecordingRef.current ? "listening" : "responding"); });
+            if (!isRecordingRef.current && receivedFinalRef.current) {
+              normalCloseRef.current = true;
+              socket.close();
+            }
           }
-          // Clear so next llm_start creates a fresh bubble rather than reusing this one.
-          activeAssistantIdRef.current = null;
-          pendingAssistantTextRef.current = "";
-          startTransition(() => { setMode(isRecordingRef.current ? "listening" : "responding"); });
-          // Guard with receivedFinalRef — prevents closing the socket when the welcome
-          // TTS finishes before recording has even started (isRecording is still false then).
-          if (!isRecordingRef.current && receivedFinalRef.current) {
-            normalCloseRef.current = true;
-            socket.close();
-          }
+          // Otherwise playNextTtsChunk's onended chain will call the finalise logic
+          // once the last queued chunk finishes playing.
+          return;
+        }
+
+        if (payload.type === "tts_interrupted") {
+          clearTtsQueue();
+          startTransition(() => { setMode("listening"); });
           return;
         }
 
@@ -632,14 +983,28 @@ export function VoiceAgentConsole() {
   }, [messages]);
 
   const stopStreaming = () => {
-    const socket = websocketRef.current;
     setIsRecording(false);
     isRecordingRef.current = false;
+    normalCloseRef.current = true;
+
+    // WebRTC: closing the transport tears down the peer connection; the server
+    // handles cleanup via connectionstatechange.  No "stop" message is sent
+    // because the session is persistent and there is no single "current utterance"
+    // to finalise — the server's silence debounce handles turn detection.
+    const transport = webrtcRef.current;
+    if (transport) {
+      stopAudioGraph(); // closes transport + mic + audio graph
+      setIsFinalizing(false);
+      isFinalizingRef.current = false;
+      startTransition(() => { setMode("listening"); });
+      return;
+    }
+
+    // WebSocket: send "stop" and let the existing WS pipeline finalise.
     setIsFinalizing(true);
     isFinalizingRef.current = true;
-    normalCloseRef.current = true;
     stopAudioGraph();
-
+    const socket = websocketRef.current;
     if (socket?.readyState === WebSocket.OPEN) {
       socket.send(JSON.stringify({ type: "stop" }));
       startTransition(() => {
@@ -708,6 +1073,26 @@ export function VoiceAgentConsole() {
           </div>
           <div className="topbar-meta">
             <span className="status-pill is-live">Live call support</span>
+            <div className="transport-toggle" aria-label="Select audio transport">
+              <button
+                type="button"
+                className={`transport-btn${transportType === "websocket" ? " is-active" : ""}`}
+                disabled={isRecording || isConnecting}
+                onClick={() => setTransportType("websocket")}
+                title="WebSocket transport (default)"
+              >
+                WS
+              </button>
+              <button
+                type="button"
+                className={`transport-btn${transportType === "webrtc" ? " is-active" : ""}`}
+                disabled={isRecording || isConnecting}
+                onClick={() => setTransportType("webrtc")}
+                title="WebRTC / RTP transport"
+              >
+                RTC
+              </button>
+            </div>
             <button
               type="button"
               className="theme-toggle"

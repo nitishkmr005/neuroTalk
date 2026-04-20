@@ -1,6 +1,6 @@
 # NeuroTalk
 
-Real-time voice agent console — live speech transcription with AI-assisted responses.
+Real-time voice agent console — live speech transcription with AI-assisted responses and interrupt handling.
 
 ![NeuroTalk voice agent console](docs/images/neurotalk-console-preview.png)
 
@@ -19,29 +19,48 @@ Designed for two contexts: **customer-facing** (direct query answering) and **as
 |-------|------|
 | Frontend | Next.js 15 · TypeScript · Lora + DM Serif Display fonts |
 | Backend | FastAPI · Python 3.11+ · uv |
-| STT | faster-whisper (`small`, int8, CPU) |
-| LLM | Ollama (local) — `gemma3:1b` (default) |
+| Transport (audio in) | **WebRTC / RTP** (Opus codec, `aiortc` + `PyAV`) · WebSocket PCM streaming |
+| Transport (agent out) | **RTCDataChannel** (ordered JSON) · WebSocket JSON |
+| STT | faster-whisper (`small`, int8, CPU) — via CTranslate2 |
+| LLM | Ollama (local) — `llama3.2:3b` (default) |
 | TTS | Kokoro 82M MLX (default) · Chatterbox Turbo · Qwen · VibeVoice |
-| Transport | WebSocket streaming |
+| Server-side VAD | Energy RMS on decoded Opus frames (aiortc/av pipeline) |
+| ICE / NAT traversal | STUN (`stun.l.google.com:19302`) · Vanilla ICE (full gather before offer) |
 | Config | Pydantic Settings + `.env` |
 | Logging | Loguru — colorful terminal + rotating JSON files |
 
 ## Quick Start
 
 ```bash
-# 1. Install dependencies
+# 1. Install system dependency (macOS — required by aiortc for SRTP)
+brew install libsrtp
+
+# 2. Install project dependencies
 make setup
 
-# 2. Set up Ollama (LLM — local, no API key)
+# 3. Set up Ollama (LLM — local, no API key)
 brew install ollama
-ollama pull gemma3:1b
+ollama pull llama3.2:3b
 ollama serve          # runs at http://localhost:11434
 
-# 3. Run both services
+# 4. Run both services
 make dev
 # Frontend → http://localhost:3000
 # Backend  → http://localhost:8000
 ```
+
+> **Linux:** replace `brew install libsrtp` with `apt-get install libsrtp2-dev` (Debian/Ubuntu).
+
+## Transports
+
+NeuroTalk supports two transport modes selectable in the UI:
+
+| Mode | Audio path | Signalling |
+|------|-----------|------------|
+| **WebRTC** (default) | Browser mic → Opus RTP → UDP → aiortc → PCM 16kHz | RTCDataChannel (JSON) |
+| **WebSocket** | Browser mic → Float32 PCM → WebSocket binary frames | Same WebSocket (JSON) |
+
+WebRTC is recommended: browser-native echo cancellation, noise suppression, and auto-gain control are applied before encoding. The data channel carries the same JSON protocol as the WebSocket path, so the frontend message handler is shared between both modes.
 
 ## Environment Variables
 
@@ -52,9 +71,13 @@ Copy `backend/.env.example` → `backend/.env` and adjust as needed.
 | `STT_MODEL_SIZE` | `small` | Whisper model (`tiny.en` → `large-v3`) |
 | `STT_DEVICE` | `cpu` | `cpu` or `cuda` |
 | `OLLAMA_HOST` | `http://localhost:11434` | Ollama server URL |
-| `LLM_MODEL` | `gemma3:1b` | Any model pulled via `ollama pull` |
+| `LLM_MODEL` | `llama3.2:3b` | Any model pulled via `ollama pull` |
 | `LLM_MAX_TOKENS` | `100` | Max tokens per LLM response |
+| `LLM_MAX_HISTORY_TURNS` | `6` | Conversation turns kept in context |
 | `TTS_BACKEND` | `kokoro` | TTS engine — see below |
+| `STREAM_EMIT_INTERVAL_MS` | `250` | Minimum gap between partial STT emits |
+| `STREAM_MIN_AUDIO_MS` | `300` | Minimum buffered audio before STT runs |
+| `STREAM_LLM_SILENCE_MS` | `350` | Silence window before triggering the LLM |
 
 ## Switching LLM Models
 
@@ -64,18 +87,19 @@ NeuroTalk uses Ollama for local LLM inference. Switching models is one line.
 
 | Model | `LLM_MODEL` value | Notes |
 |-------|-------------------|-------|
-| Gemma 3 1B | `gemma3:1b` | **Default.** Fast, low RAM (~1 GB). |
+| Llama 3.2 3B | `llama3.2:3b` | **Default.** Fast, low RAM (~2 GB). |
+| Qwen3 4B | `qwen3:4b` | Fast, strong tool-calling (~3 GB). |
+| Gemma 3 1B | `gemma3:1b` | Fastest, minimal memory (~1 GB). |
+| Gemma 3 4B | `gemma3:4b` | Better quality (~3 GB RAM). |
 | Llama 3.2 1B | `llama3.2:1b` | Similar speed to gemma3:1b. |
-| Gemma 3 4B | `gemma3:4b` | Better quality, ~3 GB RAM. |
-| Gemma 3 12B | `gemma3:12b` | Highest quality, ~8 GB RAM. |
 | Mistral 7B | `mistral` | Strong general model. |
 
 ```bash
 # 1. Pull the model
-ollama pull gemma3:4b
+ollama pull qwen3:4b
 
 # 2. Set in backend/.env
-LLM_MODEL=gemma3:4b
+LLM_MODEL=qwen3:4b
 
 # 3. Restart backend
 make backend
@@ -83,7 +107,7 @@ make backend
 
 One-liner (no .env edit):
 ```bash
-LLM_MODEL=gemma3:4b make backend
+LLM_MODEL=qwen3:4b make backend
 ```
 
 > To use a non-Ollama provider (OpenAI, Anthropic, etc.), update `backend/app/services/llm.py` to call the respective SDK instead of the Ollama client.
@@ -153,22 +177,27 @@ make dev TTS_BACKEND=chatterbox
 neuroTalk/
 ├── backend/              # FastAPI backend
 │   ├── app/
-│   │   ├── services/     # STT and LLM service modules
+│   │   ├── main.py       # WebSocket route + streaming pipeline
+│   │   ├── webrtc/       # WebRTC transport (NEW)
+│   │   │   ├── router.py     # POST /webrtc/offer, DELETE /webrtc/session/{id}
+│   │   │   └── session.py    # RTCPeerConnection, RTP consumer, VAD, STT→LLM→TTS
+│   │   ├── services/     # STT, LLM, TTS service modules
 │   │   ├── prompts/      # System prompts
-│   │   ├── agents/       # Agent orchestrators
-│   │   ├── tools/        # Tool definitions
-│   │   ├── utils/        # Shared utilities
-│   │   └── modules/      # Reusable modules
+│   │   ├── utils/        # Shared utilities (emotion tag cleaning, etc.)
+│   │   └── models.py     # Pydantic response models
 │   ├── config/           # Settings + logging
 │   └── logs/             # JSON log files (latest 5 kept)
 ├── frontend/             # Next.js app
+│   └── components/
+│       ├── voice-agent-console.tsx   # Main UI — WebRTC + WS mode toggle
+│       └── webrtc-transport.ts       # RTCPeerConnection + RTCDataChannel client (NEW)
 ├── scripts/              # Standalone learnable Python demos
 │   ├── stt.py            # STT only
 │   ├── llm_call.py       # LLM only
 │   ├── tts.py            # TTS only
 │   └── agent.py          # Full pipeline
 ├── docs/
-│   └── blog.md           # Project explainer
+│   └── blog.md           # End-to-end pipeline deep-dive
 └── Makefile
 ```
 
