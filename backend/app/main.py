@@ -16,6 +16,7 @@ from app.models import HealthResponse, TranscriptionResponse
 from app.services.llm import stream_llm_response
 from app.services.stt import get_stt_service
 from app.services.tts import get_tts_service
+from app.services.vad import get_vad_service
 from app.utils.emotion import strip_emotion_tags, clean_for_tts
 from app.utils.session_logger import LLMCallLog, STTRunLog, SessionLog, _iso, write_session_log
 from app.webrtc.router import router as webrtc_router
@@ -52,6 +53,14 @@ async def _warmup_models() -> None:
         logger.info("event=stt_warmup_done ms={}", round((perf_counter() - stt_t0) * 1000))
     except Exception as err:
         logger.warning("event=stt_warmup_failed error={}", err)
+
+    if settings.stream_vad_enabled:
+        vad_t0 = perf_counter()
+        try:
+            await loop.run_in_executor(None, get_vad_service()._load_model)
+            logger.info("event=vad_warmup_done ms={}", round((perf_counter() - vad_t0) * 1000))
+        except Exception as err:
+            logger.warning("event=vad_warmup_failed error={}", err)
 
     tts_t0 = perf_counter()
     try:

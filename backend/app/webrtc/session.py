@@ -17,6 +17,7 @@ from loguru import logger
 from app.services.llm import stream_llm_response
 from app.services.stt import get_stt_service
 from app.services.tts import get_tts_service
+from app.services.vad import StreamingVAD, get_vad_service
 from app.utils.emotion import clean_for_tts, strip_emotion_tags
 from config.settings import get_settings
 
@@ -74,6 +75,7 @@ class WebRTCSession:
         self._latest_llm_input = ""
         self._interrupt_event = asyncio.Event()
         self._silence_debounce_task: asyncio.Task | None = None
+        self._speech_finalization_task: asyncio.Task | None = None
 
         # Conversation state
         self._conversation_history: list[dict[str, str]] = []
@@ -82,6 +84,9 @@ class WebRTCSession:
         # Barge-in state
         self._is_agent_speaking = False
         self._barge_in_count = 0
+        self._vad_stream: StreamingVAD | None = (
+            get_vad_service().create_stream() if self._settings.stream_vad_enabled else None
+        )
 
         # Background tasks
         self._audio_task: asyncio.Task | None = None
@@ -167,6 +172,11 @@ class WebRTCSession:
                 with suppress(asyncio.CancelledError):
                     await self._silence_debounce_task
                 self._silence_debounce_task = None
+            if self._speech_finalization_task and not self._speech_finalization_task.done():
+                self._speech_finalization_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await self._speech_finalization_task
+                self._speech_finalization_task = None
 
             if self._llm_task and not self._llm_task.done():
                 logger.info(
@@ -180,7 +190,7 @@ class WebRTCSession:
                 result = await loop.run_in_executor(None, self._transcribe_buffer)
                 await self._send_json({"type": "final", **result})
                 final_text = str(result.get("text", "")).strip()
-                if final_text and not self._llm_responded and final_text != self._latest_llm_input:
+                if final_text and final_text != self._latest_llm_input:
                     self._schedule_llm(final_text, "final")
 
     # ── RTP audio consumer ────────────────────────────────────────────────────
@@ -215,8 +225,37 @@ class WebRTCSession:
                 self._pcm_buffer.extend(pcm)
                 self._chunk_count += 1
 
-                # Server-side VAD barge-in while agent is speaking
-                if self._is_agent_speaking:
+                if self._vad_stream is not None:
+                    for vad_event in self._vad_stream.process_pcm16(pcm):
+                        if vad_event.event == "start":
+                            logger.info(
+                                "session_id={} event=vad_speech_start sample_index={} speech_prob={}",
+                                self.session_id,
+                                vad_event.sample_index,
+                                round(vad_event.speech_prob, 4),
+                            )
+                            if self._silence_debounce_task and not self._silence_debounce_task.done():
+                                self._silence_debounce_task.cancel()
+                            self._silence_debounce_task = None
+                            if self._is_agent_speaking:
+                                logger.info(
+                                    "session_id={} event=server_vad_barge_in sample_index={} speech_prob={}",
+                                    self.session_id,
+                                    vad_event.sample_index,
+                                    round(vad_event.speech_prob, 4),
+                                )
+                                asyncio.ensure_future(self._handle_interrupt())
+                        elif vad_event.event == "end":
+                            logger.info(
+                                "session_id={} event=vad_speech_end sample_index={} speech_prob={}",
+                                self.session_id,
+                                vad_event.sample_index,
+                                round(vad_event.speech_prob, 4),
+                            )
+                            if not self._is_agent_speaking:
+                                self._schedule_speech_finalization("vad_end")
+                elif self._is_agent_speaking:
+                    # Fallback RMS gate when the dedicated VAD is disabled.
                     samples = resampled.to_ndarray().astype(np.float32) / 32_768.0
                     rms = float(np.sqrt(np.mean(samples ** 2)))
                     if rms > _BARGE_IN_THRESHOLD:
@@ -239,6 +278,9 @@ class WebRTCSession:
         """Emit a partial STT result when buffer and time thresholds are met."""
         if not self._pcm_buffer:
             return
+        if self._speech_finalization_task and not self._speech_finalization_task.done():
+            self._last_emit_at = perf_counter()
+            return
         if self._llm_task and not self._llm_task.done():
             self._last_emit_at = perf_counter()
             return
@@ -252,6 +294,13 @@ class WebRTCSession:
 
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(None, self._transcribe_buffer)
+        if self._speech_finalization_task and not self._speech_finalization_task.done():
+            self._last_emit_at = perf_counter()
+            logger.info(
+                "session_id={} event=partial_stt_skipped reason=turn_finalizing",
+                self.session_id,
+            )
+            return
         if self._llm_task and not self._llm_task.done():
             self._last_emit_at = perf_counter()
             logger.info(
@@ -308,6 +357,62 @@ class WebRTCSession:
         finally:
             temp_path.unlink(missing_ok=True)
 
+    def _schedule_speech_finalization(self, trigger: str) -> None:
+        if self._speech_finalization_task and not self._speech_finalization_task.done():
+            return
+        self._speech_finalization_task = asyncio.create_task(
+            self._finalize_speech_turn(trigger)
+        )
+
+    async def _finalize_speech_turn(self, trigger: str) -> None:
+        try:
+            if not self._pcm_buffer:
+                return
+            if self._is_agent_speaking:
+                logger.info(
+                    "session_id={} event=speech_finalization_skipped reason=agent_speaking",
+                    self.session_id,
+                )
+                return
+            if self._llm_task and not self._llm_task.done():
+                logger.info(
+                    "session_id={} event=speech_finalization_skipped reason=llm_in_flight",
+                    self.session_id,
+                )
+                return
+
+            if self._silence_debounce_task and not self._silence_debounce_task.done():
+                self._silence_debounce_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await self._silence_debounce_task
+                self._silence_debounce_task = None
+
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(None, self._transcribe_buffer)
+
+            if self._llm_task and not self._llm_task.done():
+                logger.info(
+                    "session_id={} event=speech_finalization_skipped reason=llm_started_during_transcribe",
+                    self.session_id,
+                )
+                return
+
+            final_text = str(result.get("text", "")).strip()
+            if not final_text:
+                logger.info(
+                    "session_id={} event=speech_finalization_empty trigger={}",
+                    self.session_id,
+                    trigger,
+                )
+                return
+
+            self._last_text_sent = final_text
+            await self._send_json({"type": "final", **result})
+            if final_text != self._latest_llm_input:
+                self._schedule_llm(final_text, trigger)
+        finally:
+            self._speech_finalization_task = None
+
     # ── Interrupt ─────────────────────────────────────────────────────────────
 
     async def _handle_interrupt(self) -> None:
@@ -319,10 +424,16 @@ class WebRTCSession:
         self._last_text_sent = ""
         self._chunk_count = 0
         self._last_emit_at = 0.0
+        if self._vad_stream is not None:
+            self._vad_stream.reset()
 
         if self._silence_debounce_task and not self._silence_debounce_task.done():
             self._silence_debounce_task.cancel()
             self._silence_debounce_task = None
+
+        if self._speech_finalization_task and not self._speech_finalization_task.done():
+            self._speech_finalization_task.cancel()
+            self._speech_finalization_task = None
 
         # Cancel TTS pipeline first so it doesn't send more audio after the new
         # _run_llm clears interrupt_event.
@@ -340,6 +451,9 @@ class WebRTCSession:
         try:
             await asyncio.sleep(self._settings.stream_llm_silence_ms / 1000)
         except asyncio.CancelledError:
+            return
+        if self._vad_stream is not None:
+            self._schedule_speech_finalization(trigger)
             return
         self._schedule_llm(text, trigger)
 
@@ -493,6 +607,8 @@ class WebRTCSession:
             self._last_text_sent = ""
             self._chunk_count = 0
             self._last_emit_at = 0.0
+            if self._vad_stream is not None:
+                self._vad_stream.reset()
 
         if full_response and call_error is None and not self._interrupt_event.is_set():
             self._llm_responded = True
@@ -554,7 +670,13 @@ class WebRTCSession:
         if self._closed:
             return
         self._closed = True
-        for task in (self._audio_task, self._silence_debounce_task, self._tts_task, self._llm_task):
+        for task in (
+            self._audio_task,
+            self._silence_debounce_task,
+            self._speech_finalization_task,
+            self._tts_task,
+            self._llm_task,
+        ):
             if task and not task.done():
                 task.cancel()
         logger.info("session_id={} event=rtc_session_closed", self.session_id)
