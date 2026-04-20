@@ -135,6 +135,7 @@ make check    # lint + type check
 - Use `loguru`, not `logging`
 - Import order: stdlib → third-party → local (enforced by ruff)
 - No TODO comments in committed code — open a GitHub issue instead
+- Write acceptance criteria in claude.md file 
 
 ---
 

@@ -41,7 +41,7 @@ class Settings(BaseSettings):
     stream_llm_min_chars: int = 8
     # Silence window before firing the LLM (ms). Lower = more responsive,
     # higher = avoids splitting one utterance into two replies.
-    stream_llm_silence_ms: int = 350
+    stream_llm_silence_ms: int = 950
 
     # ── TTS ───────────────────────────────────────────────────────────────────
     # Backend: kokoro | chatterbox | qwen | vibevoice | omnivoice
