@@ -31,8 +31,8 @@ _MIN_SENTENCE_CHARS = 15
 # Server-side VAD: energy threshold (normalised to [-1, 1]) to trigger barge-in.
 # Slightly lower than the client-side 0.15 because there is no browser AGC on the
 # raw Opus-decoded frames we see here.
-_BARGE_IN_THRESHOLD = 0.08
-_BARGE_IN_FRAMES = 2
+_BARGE_IN_THRESHOLD = 0.15
+_BARGE_IN_FRAMES = 3
 
 _RTC_CONFIG = RTCConfiguration(
     iceServers=[RTCIceServer(urls=["stun:stun.l.google.com:19302"])]
@@ -167,6 +167,13 @@ class WebRTCSession:
                     await self._silence_debounce_task
                 self._silence_debounce_task = None
 
+            if self._llm_task and not self._llm_task.done():
+                logger.info(
+                    "session_id={} event=stop_skipped_final_stt reason=llm_in_flight",
+                    self.session_id,
+                )
+                return
+
             if self._pcm_buffer:
                 loop = asyncio.get_event_loop()
                 result = await loop.run_in_executor(None, self._transcribe_buffer)
@@ -297,6 +304,10 @@ class WebRTCSession:
         self._pending_llm_call = None
         self._is_agent_speaking = False
         self._barge_in_count = 0
+        self._pcm_buffer.clear()
+        self._last_text_sent = ""
+        self._chunk_count = 0
+        self._last_emit_at = 0.0
 
         if self._silence_debounce_task and not self._silence_debounce_task.done():
             self._silence_debounce_task.cancel()
@@ -350,7 +361,7 @@ class WebRTCSession:
 
     # ── LLM + TTS pipeline ───────────────────────────────────────────────────
 
-    async def _tts_sentence_pipeline(self, queue: asyncio.Queue) -> None:
+    async def _tts_sentence_pipeline(self, queue: asyncio.Queue, enable_barge_in: bool = True) -> None:
         """
         Consume sentences from *queue* and synthesise + stream each one immediately.
 
@@ -360,11 +371,15 @@ class WebRTCSession:
         Args:
             queue: Unbounded asyncio queue carrying ``str`` sentences or a ``None``
                    sentinel that signals end-of-stream.
+            enable_barge_in: When ``False``, server-side VAD is not activated — used
+                             for the welcome message to prevent ambient noise from
+                             cancelling synthesis before the user has spoken.
         """
         tts_service = get_tts_service()
         tts_started = False
         tts_t0 = perf_counter()
-        self._is_agent_speaking = True
+        if enable_barge_in:
+            self._is_agent_speaking = True
 
         while True:
             sentence = await queue.get()
@@ -401,10 +416,6 @@ class WebRTCSession:
 
     async def _run_llm(self, text: str, trigger: str) -> None:
         self._llm_responded = False
-        self._pcm_buffer.clear()
-        self._last_text_sent = ""
-        self._chunk_count = 0
-        self._last_emit_at = 0.0
         self._interrupt_event.clear()
         self._latest_llm_input = text
 
@@ -464,6 +475,14 @@ class WebRTCSession:
             await tts_task
         self._tts_task = None
 
+        # Clear audio buffer after the full turn (LLM + TTS) completes so any speech
+        # the user started during the agent's response isn't fed into the next query.
+        if not self._interrupt_event.is_set():
+            self._pcm_buffer.clear()
+            self._last_text_sent = ""
+            self._chunk_count = 0
+            self._last_emit_at = 0.0
+
         if full_response and call_error is None and not self._interrupt_event.is_set():
             self._llm_responded = True
             self._conversation_history.append({"role": "user", "content": text})
@@ -500,7 +519,7 @@ class WebRTCSession:
                 sent_queue.put_nowait(sentence)
         sent_queue.put_nowait(None)
 
-        await self._tts_sentence_pipeline(sent_queue)
+        await self._tts_sentence_pipeline(sent_queue, enable_barge_in=False)
 
     # ── Helpers ──────────────────────────────────────────────────────────────
 
