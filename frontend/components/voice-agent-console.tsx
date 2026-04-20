@@ -130,7 +130,7 @@ type TransportType = "websocket" | "webrtc";
 
 export function VoiceAgentConsole() {
   const [isDark, setIsDark] = useState(true);
-  const [transportType, setTransportType] = useState<TransportType>("websocket");
+  const [transportType, setTransportType] = useState<TransportType>("webrtc");
   const [mode, setMode] = useState<Mode>("listening");
   const [isRecording, setIsRecording] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
@@ -162,6 +162,9 @@ export function VoiceAgentConsole() {
   const ttsAllChunksReceivedRef = useRef(false);
   // Text revealed so far in the current assistant turn (accumulates across chunks).
   const revealedTextRef = useRef("");
+  // Counts tts_audio chunks whose decodeAudioData hasn't fired yet — prevents
+  // premature finalisation when tts_done arrives before all decodes complete.
+  const pendingDecodesRef = useRef(0);
 
   const websocketRef = useRef<WebSocket | null>(null);
   const webrtcRef = useRef<WebRTCTransport | null>(null);
@@ -237,6 +240,7 @@ export function VoiceAgentConsole() {
     isTtsPlayingRef.current = false;
     ttsAllChunksReceivedRef.current = false;
     revealedTextRef.current = "";
+    pendingDecodesRef.current = 0;
   };
 
   // Hoisted helper so playNextTtsChunk and message handlers can both call it.
@@ -251,6 +255,7 @@ export function VoiceAgentConsole() {
     isTtsPlayingRef.current = false;
     ttsAllChunksReceivedRef.current = false;
     revealedTextRef.current = "";
+    pendingDecodesRef.current = 0;
     if (revealRafRef.current !== null) {
       cancelAnimationFrame(revealRafRef.current);
       revealRafRef.current = null;
@@ -260,15 +265,26 @@ export function VoiceAgentConsole() {
   const playNextTtsChunk = useCallback(() => {
     if (ttsQueueRef.current.length === 0) {
       isTtsPlayingRef.current = false;
-      if (ttsAllChunksReceivedRef.current) {
-        // All sentences played — finalise the assistant bubble.
+      // Only finalise once all decodeAudioData callbacks have fired — prevents
+      // premature wrap-up when tts_done arrives before the last decode completes.
+      if (ttsAllChunksReceivedRef.current && pendingDecodesRef.current === 0) {
         const aid = activeAssistantIdRef.current;
         const fullText = pendingAssistantTextRef.current;
         if (aid && fullText) updateMsg(aid, { text: fullText, isStreaming: false });
         activeAssistantIdRef.current = null;
         pendingAssistantTextRef.current = "";
         revealedTextRef.current = "";
-        startTransition(() => { setMode(isRecordingRef.current ? "listening" : "responding"); });
+        // WebRTC is a persistent session — add a fresh Listening bubble for the next turn.
+        if (webrtcRef.current && !activeUserIdRef.current) {
+          receivedFinalRef.current = false;
+          const freshUid = crypto.randomUUID();
+          activeUserIdRef.current = freshUid;
+          setMessages((prev) => [
+            ...prev,
+            { id: freshUid, role: "user", text: "Listening…", isStreaming: true, isError: false },
+          ]);
+        }
+        startTransition(() => { setMode("listening"); });
       }
       return;
     }
@@ -469,22 +485,27 @@ export function VoiceAgentConsole() {
               }
             }
             activeUserIdRef.current = null;
+            // Finalize any lingering assistant bubble from a previous interrupted turn
+            // instead of resetting it — that way the partial response stays visible.
+            const prevAid = activeAssistantIdRef.current;
+            if (prevAid) {
+              const prevText = revealedTextRef.current || pendingAssistantTextRef.current;
+              if (prevText) updateMsg(prevAid, { text: prevText, isStreaming: false });
+            }
+            activeAssistantIdRef.current = null;
             pendingAssistantTextRef.current = "";
             ttsAudioReceivedRef.current = false;
             if (revealRafRef.current !== null) {
               cancelAnimationFrame(revealRafRef.current);
               revealRafRef.current = null;
             }
-            if (!activeAssistantIdRef.current) {
-              const aid = crypto.randomUUID();
-              activeAssistantIdRef.current = aid;
-              setMessages((prev) => [
-                ...prev,
-                { id: aid, role: "assistant", text: "", isStreaming: true, isError: false },
-              ]);
-            } else {
-              updateMsg(activeAssistantIdRef.current, { text: "", isStreaming: true, isError: false });
-            }
+            // Always open a fresh assistant bubble for this turn.
+            const aid = crypto.randomUUID();
+            activeAssistantIdRef.current = aid;
+            setMessages((prev) => [
+              ...prev,
+              { id: aid, role: "assistant", text: "", isStreaming: true, isError: false },
+            ]);
             return;
           }
 
@@ -513,10 +534,11 @@ export function VoiceAgentConsole() {
           }
 
           if (payload.type === "tts_start") {
-            ttsQueueRef.current = [];
-            isTtsPlayingRef.current = false;
-            ttsAllChunksReceivedRef.current = false;
-            revealedTextRef.current = "";
+            // Stop any currently playing audio before starting the new sequence.
+            // Prevents parallel playback when a second response starts before the
+            // first finishes (e.g. after a short-pause false LLM trigger).
+            clearTtsQueue();
+            pendingDecodesRef.current = 0;
             ttsAudioReceivedRef.current = false;
             startTransition(() => { setMode("speaking"); });
             return;
@@ -532,7 +554,9 @@ export function VoiceAgentConsole() {
             const audioCtx = audioContextRef.current ?? new AudioContext();
             if (!audioContextRef.current) audioContextRef.current = audioCtx;
             ttsAudioReceivedRef.current = true;
+            pendingDecodesRef.current++;
             void audioCtx.decodeAudioData(bytes.buffer.slice(0), (buffer) => {
+              pendingDecodesRef.current--;
               ttsQueueRef.current.push({ buffer, text: sentenceText });
               if (!isTtsPlayingRef.current) playNextTtsChunk();
             });
@@ -542,6 +566,7 @@ export function VoiceAgentConsole() {
           if (payload.type === "tts_done") {
             ttsAllChunksReceivedRef.current = true;
             if (!ttsAudioReceivedRef.current) {
+              // TTS produced nothing (error path) — show LLM text directly.
               const aid = activeAssistantIdRef.current;
               if (aid && pendingAssistantTextRef.current) {
                 updateMsg(aid, { text: pendingAssistantTextRef.current, isStreaming: false });
@@ -549,16 +574,21 @@ export function VoiceAgentConsole() {
               activeAssistantIdRef.current = null;
               pendingAssistantTextRef.current = "";
               revealedTextRef.current = "";
-            } else if (!isTtsPlayingRef.current && ttsQueueRef.current.length === 0) {
+              receivedFinalRef.current = false;
+              const freshUid = crypto.randomUUID();
+              activeUserIdRef.current = freshUid;
+              setMessages((prev) => [
+                ...prev,
+                { id: freshUid, role: "user", text: "Listening…", isStreaming: true, isError: false },
+              ]);
+              startTransition(() => { setMode("listening"); });
+            } else if (!isTtsPlayingRef.current && ttsQueueRef.current.length === 0 && pendingDecodesRef.current === 0) {
+              // All audio already played and decoded before tts_done arrived.
               const aid = activeAssistantIdRef.current;
               if (aid) updateMsg(aid, { text: pendingAssistantTextRef.current, isStreaming: false });
               activeAssistantIdRef.current = null;
               pendingAssistantTextRef.current = "";
               revealedTextRef.current = "";
-            }
-            // Persistent WebRTC: reset for next turn after playback finishes.
-            // playNextTtsChunk's finalise path will handle the "still playing" case.
-            if (!isTtsPlayingRef.current && ttsQueueRef.current.length === 0) {
               receivedFinalRef.current = false;
               const freshUid = crypto.randomUUID();
               activeUserIdRef.current = freshUid;
@@ -568,6 +598,7 @@ export function VoiceAgentConsole() {
               ]);
               startTransition(() => { setMode("listening"); });
             }
+            // Otherwise playNextTtsChunk's finalise path handles it once the queue drains.
             return;
           }
 
@@ -800,31 +831,28 @@ export function VoiceAgentConsole() {
           const userText = payload.user_text?.trim();
           if (uid) {
             if (userText) {
-              // Finalize the user bubble with the transcript that triggered this LLM call.
               updateMsg(uid, { text: userText, isStreaming: false });
             } else {
-              // No user text (welcome message) — remove the placeholder "Listening…" bubble.
               setMessages((prev) => prev.filter((m) => m.id !== uid));
             }
           }
-          // Null ref so the next partial creates a fresh user bubble for the next turn
           activeUserIdRef.current = null;
-          // Reset the buffered text — bubble will stay on typing indicator until TTS plays
+          // Finalize any lingering assistant bubble rather than resetting it.
+          const prevAid = activeAssistantIdRef.current;
+          if (prevAid) {
+            const prevText = revealedTextRef.current || pendingAssistantTextRef.current;
+            if (prevText) updateMsg(prevAid, { text: prevText, isStreaming: false });
+          }
+          activeAssistantIdRef.current = null;
           pendingAssistantTextRef.current = "";
           ttsAudioReceivedRef.current = false;
           if (revealRafRef.current !== null) {
             cancelAnimationFrame(revealRafRef.current);
             revealRafRef.current = null;
           }
-          // Reuse existing bubble if present (guards against backend sending llm_start twice).
-          // Otherwise create a fresh one.
-          if (!activeAssistantIdRef.current) {
-            const aid = crypto.randomUUID();
-            activeAssistantIdRef.current = aid;
-            setMessages((prev) => [...prev, { id: aid, role: "assistant", text: "", isStreaming: true, isError: false }]);
-          } else {
-            updateMsg(activeAssistantIdRef.current, { text: "", isStreaming: true, isError: false });
-          }
+          const aid = crypto.randomUUID();
+          activeAssistantIdRef.current = aid;
+          setMessages((prev) => [...prev, { id: aid, role: "assistant", text: "", isStreaming: true, isError: false }]);
           return;
         }
 
@@ -854,11 +882,8 @@ export function VoiceAgentConsole() {
         }
 
         if (payload.type === "tts_start") {
-          // Reset queue state for this new TTS turn.
-          ttsQueueRef.current = [];
-          isTtsPlayingRef.current = false;
-          ttsAllChunksReceivedRef.current = false;
-          revealedTextRef.current = "";
+          clearTtsQueue();
+          pendingDecodesRef.current = 0;
           ttsAudioReceivedRef.current = false;
           startTransition(() => { setMode("speaking"); });
           return;
@@ -873,7 +898,9 @@ export function VoiceAgentConsole() {
           const audioCtx = audioContextRef.current ?? new AudioContext();
           if (!audioContextRef.current) audioContextRef.current = audioCtx;
           ttsAudioReceivedRef.current = true;
+          pendingDecodesRef.current++;
           void audioCtx.decodeAudioData(bytes.buffer.slice(0), (buffer) => {
+            pendingDecodesRef.current--;
             ttsQueueRef.current.push({ buffer, text: sentenceText });
             if (!isTtsPlayingRef.current) playNextTtsChunk();
           });
@@ -883,7 +910,6 @@ export function VoiceAgentConsole() {
         if (payload.type === "tts_done") {
           ttsAllChunksReceivedRef.current = true;
           if (!ttsAudioReceivedRef.current) {
-            // TTS produced nothing (error path) — show the LLM text directly.
             const aid = activeAssistantIdRef.current;
             if (aid && pendingAssistantTextRef.current) {
               updateMsg(aid, { text: pendingAssistantTextRef.current, isStreaming: false });
@@ -896,8 +922,7 @@ export function VoiceAgentConsole() {
               normalCloseRef.current = true;
               socket.close();
             }
-          } else if (!isTtsPlayingRef.current && ttsQueueRef.current.length === 0) {
-            // All audio already finished playing before tts_done arrived.
+          } else if (!isTtsPlayingRef.current && ttsQueueRef.current.length === 0 && pendingDecodesRef.current === 0) {
             const aid = activeAssistantIdRef.current;
             if (aid) updateMsg(aid, { text: pendingAssistantTextRef.current, isStreaming: false });
             activeAssistantIdRef.current = null;
@@ -909,8 +934,6 @@ export function VoiceAgentConsole() {
               socket.close();
             }
           }
-          // Otherwise playNextTtsChunk's onended chain will call the finalise logic
-          // once the last queued chunk finishes playing.
           return;
         }
 
@@ -1076,21 +1099,21 @@ export function VoiceAgentConsole() {
             <div className="transport-toggle" aria-label="Select audio transport">
               <button
                 type="button"
-                className={`transport-btn${transportType === "websocket" ? " is-active" : ""}`}
-                disabled={isRecording || isConnecting}
-                onClick={() => setTransportType("websocket")}
-                title="WebSocket transport (default)"
-              >
-                WS
-              </button>
-              <button
-                type="button"
                 className={`transport-btn${transportType === "webrtc" ? " is-active" : ""}`}
                 disabled={isRecording || isConnecting}
                 onClick={() => setTransportType("webrtc")}
-                title="WebRTC / RTP transport"
+                title="WebRTC — Opus/RTP over UDP with built-in echo cancellation and server-side VAD. Recommended."
               >
-                RTC
+                WebRTC
+              </button>
+              <button
+                type="button"
+                className={`transport-btn${transportType === "websocket" ? " is-active" : ""}`}
+                disabled={isRecording || isConnecting}
+                onClick={() => setTransportType("websocket")}
+                title="WebSocket — raw PCM over TCP. Simpler but no echo cancellation. Use if WebRTC fails."
+              >
+                WebSocket
               </button>
             </div>
             <button

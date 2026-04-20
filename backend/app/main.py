@@ -193,6 +193,7 @@ async def transcribe_stream(websocket: WebSocket) -> None:
     last_text_sent = ""
     send_lock = asyncio.Lock()
     llm_task: asyncio.Task[None] | None = None
+    active_tts_task: asyncio.Task[None] | None = None
     pending_llm_call: tuple[str, str] | None = None
     latest_llm_input = ""
     interrupt_event = asyncio.Event()
@@ -267,7 +268,7 @@ async def transcribe_stream(websocket: WebSocket) -> None:
             await send_json({"type": "tts_done"})
 
     async def run_llm_stream(text: str, trigger: str) -> None:
-        nonlocal llm_task, pending_llm_call, latest_llm_input, last_text_sent, chunk_count, last_emit_at, llm_responded
+        nonlocal llm_task, active_tts_task, pending_llm_call, latest_llm_input, last_text_sent, chunk_count, last_emit_at, llm_responded
         llm_responded = False
         # Clear audio buffer — this utterance is captured; next audio is a new turn
         pcm_buffer.clear()
@@ -286,6 +287,7 @@ async def transcribe_stream(websocket: WebSocket) -> None:
         # Sentence queue feeds the TTS pipeline task which runs concurrently.
         sent_queue: asyncio.Queue[str | None] = asyncio.Queue()
         tts_task = asyncio.create_task(_tts_sentence_pipeline(sent_queue))
+        active_tts_task = tts_task
 
         try:
             await send_json({"type": "llm_start", "user_text": text})
@@ -330,6 +332,7 @@ async def transcribe_stream(websocket: WebSocket) -> None:
         # Wait for all sentences to be synthesised and sent.
         with suppress(asyncio.CancelledError):
             await tts_task
+        active_tts_task = None
 
         approx_tokens = round(len(full_response.split()) * 1.3) if full_response else 0
         session_log.llm_calls.append(
@@ -388,6 +391,9 @@ async def transcribe_stream(websocket: WebSocket) -> None:
             logger.info("request_id={} event=llm_cancel_for_newer_text", request_id)
             interrupt_event.set()
             pending_llm_call = None
+            if active_tts_task is not None and not active_tts_task.done():
+                active_tts_task.cancel()
+                active_tts_task = None
             llm_task.cancel()
             llm_task = None
 
@@ -408,19 +414,19 @@ async def transcribe_stream(websocket: WebSocket) -> None:
         welcome = settings.welcome_message
         if not welcome:
             return
-        # Create an assistant bubble in the frontend for the welcome text
         await send_json({"type": "llm_start", "user_text": ""})
         await send_json({"type": "llm_final", "text": welcome, "llm_ms": 0})
-        await send_json({"type": "tts_start"})
-        try:
-            wav_bytes, sr = await get_tts_service().synthesize(clean_for_tts(welcome))
-        except Exception as err:
-            logger.warning("request_id={} event=welcome_tts_error error={}", request_id, err)
-            await send_json({"type": "tts_done"})
-            return
-        wav_b64 = base64.b64encode(wav_bytes).decode()
-        await send_json({"type": "tts_audio", "data": wav_b64, "sample_rate": sr, "tts_ms": 0})
-        await send_json({"type": "tts_done"})
+
+        # Split on sentence-ending punctuation so each sentence gets its own tts_audio
+        # message with sentence_text — matching the regular pipeline's synced text reveal.
+        sent_queue: asyncio.Queue[str | None] = asyncio.Queue()
+        for raw in re.split(r"(?<=[.!?])\s+", welcome.strip()):
+            sentence = clean_for_tts(raw.strip())
+            if sentence:
+                sent_queue.put_nowait(sentence)
+        sent_queue.put_nowait(None)
+
+        await _tts_sentence_pipeline(sent_queue)
 
     await send_json({"type": "ready", "request_id": request_id})
     asyncio.create_task(run_welcome())
@@ -448,10 +454,10 @@ async def transcribe_stream(websocket: WebSocket) -> None:
                     if silence_debounce_task is not None and not silence_debounce_task.done():
                         silence_debounce_task.cancel()
                         silence_debounce_task = None
+                    if active_tts_task is not None and not active_tts_task.done():
+                        active_tts_task.cancel()
+                        active_tts_task = None
                     if llm_task is not None and not llm_task.done():
-                        # Fire-and-forget cancel — the tts_pipeline task will see
-                        # interrupt_event and send tts_interrupted itself.  Awaiting
-                        # here would block the receive loop while TTS synthesis finishes.
                         llm_task.cancel()
                         llm_task = None
                     continue

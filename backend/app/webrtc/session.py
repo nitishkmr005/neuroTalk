@@ -68,6 +68,7 @@ class WebRTCSession:
         # Concurrency helpers
         self._send_lock = asyncio.Lock()
         self._llm_task: asyncio.Task | None = None
+        self._tts_task: asyncio.Task | None = None
         self._pending_llm_call: tuple[str, str] | None = None
         self._latest_llm_input = ""
         self._interrupt_event = asyncio.Event()
@@ -84,6 +85,7 @@ class WebRTCSession:
         # Background tasks
         self._audio_task: asyncio.Task | None = None
         self._closed = False
+
 
         self._register_pc_handlers()
 
@@ -300,9 +302,13 @@ class WebRTCSession:
             self._silence_debounce_task.cancel()
             self._silence_debounce_task = None
 
+        # Cancel TTS pipeline first so it doesn't send more audio after the new
+        # _run_llm clears interrupt_event.
+        if self._tts_task and not self._tts_task.done():
+            self._tts_task.cancel()
+            self._tts_task = None
+
         if self._llm_task and not self._llm_task.done():
-            # Fire-and-forget cancel — _tts_sentence_pipeline sees interrupt_event
-            # and sends tts_interrupted itself without blocking the audio consumer.
             self._llm_task.cancel()
             self._llm_task = None
 
@@ -330,6 +336,9 @@ class WebRTCSession:
             )
             self._interrupt_event.set()
             self._pending_llm_call = None
+            if self._tts_task and not self._tts_task.done():
+                self._tts_task.cancel()
+                self._tts_task = None
             self._llm_task.cancel()
             self._llm_task = None
 
@@ -406,6 +415,7 @@ class WebRTCSession:
 
         sent_queue: asyncio.Queue[str | None] = asyncio.Queue()
         tts_task = asyncio.create_task(self._tts_sentence_pipeline(sent_queue))
+        self._tts_task = tts_task
 
         try:
             await self._send_json({"type": "llm_start", "user_text": text})
@@ -452,6 +462,7 @@ class WebRTCSession:
 
         with suppress(asyncio.CancelledError):
             await tts_task
+        self._tts_task = None
 
         if full_response and call_error is None and not self._interrupt_event.is_set():
             self._llm_responded = True
@@ -479,20 +490,17 @@ class WebRTCSession:
             return
         await self._send_json({"type": "llm_start", "user_text": ""})
         await self._send_json({"type": "llm_final", "text": welcome, "llm_ms": 0})
-        await self._send_json({"type": "tts_start"})
-        try:
-            wav_bytes, sr = await get_tts_service().synthesize(clean_for_tts(welcome))
-        except Exception as err:
-            logger.warning(
-                "session_id={} event=welcome_tts_error error={}", self.session_id, err
-            )
-            await self._send_json({"type": "tts_done"})
-            return
-        wav_b64 = base64.b64encode(wav_bytes).decode()
-        await self._send_json(
-            {"type": "tts_audio", "data": wav_b64, "sample_rate": sr, "tts_ms": 0}
-        )
-        await self._send_json({"type": "tts_done"})
+
+        # Split on sentence-ending punctuation so each sentence gets its own tts_audio
+        # message with sentence_text — matching the regular pipeline's synced text reveal.
+        sent_queue: asyncio.Queue[str | None] = asyncio.Queue()
+        for raw in re.split(r"(?<=[.!?])\s+", welcome.strip()):
+            sentence = clean_for_tts(raw.strip())
+            if sentence:
+                sent_queue.put_nowait(sentence)
+        sent_queue.put_nowait(None)
+
+        await self._tts_sentence_pipeline(sent_queue)
 
     # ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -516,7 +524,7 @@ class WebRTCSession:
         if self._closed:
             return
         self._closed = True
-        for task in (self._audio_task, self._silence_debounce_task, self._llm_task):
+        for task in (self._audio_task, self._silence_debounce_task, self._tts_task, self._llm_task):
             if task and not task.done():
                 task.cancel()
         logger.info("session_id={} event=rtc_session_closed", self.session_id)
