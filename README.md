@@ -6,7 +6,7 @@ Real-time voice agent console with selectable `WebRTC` and `WebSocket` transport
 
 ## Demo
 
-https://github.com/nitishkmr005/neuroTalk/raw/main/docs/NeuroTalk_Social_Media_V2.mp4
+https://github.com/nitishkmr005/neuroTalk/raw/main/docs/NeuroTalk_Social_Media_V3.mp4
 
 In the preview above, `Response Generation: 14.16 s` reflects the time the LLM spends generating the reply token by token in real time.
 Because text streaming and voice streaming are synchronized, TTS starts speaking as tokens arrive, so playback overlaps with generation instead of waiting for the full response.
