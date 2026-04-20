@@ -44,9 +44,9 @@ class Settings(BaseSettings):
     stream_llm_silence_ms: int = 950
     # Dedicated streaming VAD for endpointing and barge-in.
     stream_vad_enabled: bool = True
-    stream_vad_threshold: float = 0.4
-    stream_vad_min_silence_ms: int = 600
-    stream_vad_speech_pad_ms: int = 200
+    stream_vad_threshold: float = 0.6
+    stream_vad_min_silence_ms: int = 800
+    stream_vad_speech_pad_ms: int = 250
     stream_vad_frame_samples: int = 512
 
     # ── TTS ───────────────────────────────────────────────────────────────────
