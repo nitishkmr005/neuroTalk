@@ -28,7 +28,8 @@ Mic hardware
                                                   └─ av.AudioResampler
                                                        └─ PCM 16 kHz buffer
                                                             │
-                                                     Server-side VAD
+                                               Streaming Silero VAD
+                                              (RMS fallback if disabled)
                                                             │
                                                       faster-whisper STT
                                                             │
@@ -129,6 +130,8 @@ async def setup(self, offer_sdp: str, offer_type: str) -> RTCSessionDescription:
 
 After the browser sets the answer as its remote description, both sides start the ICE connectivity checks and DTLS handshake.
 
+Once the RTC data channel opens, the server immediately sends a `ready` event and can optionally stream a spoken `WELCOME_MESSAGE`. That welcome greeting uses the same sentence-streamed TTS path as normal assistant replies, but barge-in is temporarily disabled for that first turn so ambient noise does not cancel it before the user speaks.
+
 ---
 
 ### Step 3 — ICE connectivity checks and NAT traversal
@@ -222,27 +225,44 @@ The result stored in `_pcm_buffer` is raw **PCM16 mono at 16 kHz** — two bytes
 
 ---
 
-### Step 7 — Server-side VAD (Voice Activity Detection) for barge-in
+### Step 7 — Streaming Silero VAD for endpointing and barge-in
 
-While the agent is speaking (`_is_agent_speaking = True`), the server runs a lightweight energy-based VAD on every decoded frame:
+After resampling, the WebRTC pipeline feeds every PCM16 chunk into a dedicated streaming `Silero VAD` instance:
 
 ```python
-if self._is_agent_speaking:
-    samples = resampled.to_ndarray().astype(np.float32) / 32_768.0
-    rms = float(np.sqrt(np.mean(samples ** 2)))
-    if rms > _BARGE_IN_THRESHOLD:   # 0.08 normalised
-        self._barge_in_count += 1
-        if self._barge_in_count >= _BARGE_IN_FRAMES:  # 2 consecutive frames
+for vad_event in self._vad_stream.process_pcm16(pcm):
+    if vad_event.event == "start":
+        if self._is_agent_speaking:
             asyncio.ensure_future(self._handle_interrupt())
-    else:
-        self._barge_in_count = 0
+    elif vad_event.event == "end":
+        if not self._is_agent_speaking:
+            self._schedule_speech_finalization("vad_end")
 ```
 
-**Why server-side VAD instead of relying only on the frontend?**
+Internally, that stream keeps a small rolling buffer and runs the Silero model on `512`-sample frames at `16 kHz`:
 
-The frontend also detects barge-in via its `ScriptProcessorNode` and sends an `interrupt` message. But there is latency between when the user speaks and when that WebSocket message arrives. Server-side VAD fires the interrupt directly on the audio consumer task — no round-trip to the browser required. The threshold (0.08 RMS) is lower than the frontend's 0.15 because the server sees raw Opus-decoded PCM without browser AGC, so speech-level values are naturally lower.
+```python
+speech_prob = float(self._model(frame_tensor, 16_000).item())
+if speech_prob >= threshold and not triggered:
+    events.append(VADStreamEvent(event="start", ...))
+elif speech_prob < neg_threshold and triggered:
+    if current_sample - temp_end >= min_silence_samples:
+        events.append(VADStreamEvent(event="end", ...))
+```
 
-Two consecutive high-energy frames are required before triggering (`_BARGE_IN_FRAMES = 2`). This filters out click transients and encoding artifacts that might cause false positives on a single frame.
+The important tuning knobs are:
+
+- `STREAM_VAD_THRESHOLD=0.4`
+- `STREAM_VAD_MIN_SILENCE_MS=600`
+- `STREAM_VAD_SPEECH_PAD_MS=200`
+- `STREAM_VAD_FRAME_SAMPLES=512`
+
+This VAD does two jobs at once:
+
+- it detects **speech start** quickly enough to interrupt assistant playback when the user barges in
+- it detects **speech end** so the turn can be finalized before waiting on a full fallback timeout
+
+If dedicated VAD is disabled, the server falls back to a simpler RMS gate only for barge-in while the agent is speaking. That fallback is intentionally narrower; it does not drive the full speech-start/speech-end endpointing logic.
 
 ---
 
@@ -283,20 +303,30 @@ When the transcript changes, a `partial` message is sent over the data channel a
 
 ---
 
-### Step 9 — Silence debounce and LLM trigger
+### Step 9 — VAD endpointing with silence-debounce fallback
 
-After each new partial transcript, a debounce timer is started. If no new (different) transcript arrives within 350 ms, the timer fires and the LLM is called:
+Partial transcripts are still emitted on a timer, but they are no longer the only trigger for turn completion. In the WebRTC path, `Silero VAD` is the primary endpointing signal and the debounce timer is the safety net:
 
 ```python
 async def _silence_debounce_then_fire(self, text: str, trigger: str) -> None:
     try:
-        await asyncio.sleep(self._settings.stream_llm_silence_ms / 1000)  # 0.35 s
+        await asyncio.sleep(self._settings.stream_llm_silence_ms / 1000)
     except asyncio.CancelledError:
+        return
+    if self._vad_stream is not None:
+        self._schedule_speech_finalization(trigger)
         return
     self._schedule_llm(text, trigger)
 ```
 
-Every new partial result cancels and restarts the timer. This means the LLM fires shortly after the user pauses, not after a fixed timeout. A minimum length guard (`stream_llm_min_chars = 8`) prevents the LLM from being called on fragments too short to represent intent.
+The sequence is:
+
+1. partial STT changes restart the fallback debounce timer
+2. if `vad_speech_end` arrives first, the server finalizes the turn immediately
+3. if VAD end does not arrive cleanly, the debounce fallback finalizes the buffered speech anyway
+4. only then is the LLM scheduled, subject to guards like `STREAM_LLM_MIN_CHARS`
+
+This hybrid approach matters in practice. Whisper partials are useful, but they are not reliable enough on their own to decide turn boundaries, and VAD alone can still miss some edges. Combining both avoids duplicate turns and reduces "assistant replied before I finished" failures.
 
 ---
 
@@ -442,7 +472,7 @@ The `interrupt` message is also sent via the data channel so the server can canc
 
 ### Server-side VAD (concurrent path)
 
-As described in Step 7, the server-side VAD detects barge-in on the decoded RTP frames — independently of the client message. The first path to fire wins; both call `_handle_interrupt()`, which is idempotent (sets the event and cancels tasks, but only acts if they are not already done).
+As described in Step 7, the server-side path uses dedicated `Silero VAD` on the decoded RTP frames. A `speech_start` event while `_is_agent_speaking` is true is treated as barge-in and triggers `_handle_interrupt()` without waiting for a browser round-trip. If streaming VAD is disabled, the code falls back to a simpler RMS gate for this path.
 
 ### Interrupt handler (server)
 
@@ -450,13 +480,13 @@ As described in Step 7, the server-side VAD detects barge-in on the decoded RTP 
 async def _handle_interrupt(self) -> None:
     self._interrupt_event.set()          # signals all loops to stop
     self._is_agent_speaking = False
-    self._barge_in_count = 0
+    self._pcm_buffer.clear()
     if self._llm_task and not self._llm_task.done():
         self._llm_task.cancel()           # fire-and-forget — no await
         self._llm_task = None
 ```
 
-`_llm_task.cancel()` is fire-and-forget (no `await`). This is intentional: the LLM loop's `async for token in stream_llm_response(...)` will raise `CancelledError` on the next iteration, and `_tts_sentence_pipeline` checks `interrupt_event` before each synthesis call, so it exits cleanly without blocking the audio consumer.
+The real handler also cancels pending TTS, clears silence-debounce/finalization tasks, resets the VAD stream state, and drops buffered audio so the next user utterance starts from a clean slate. `cancel()` is still fire-and-forget: the LLM loop and TTS pipeline both observe the interrupt event and exit on their next awaited boundary.
 
 When `_tts_sentence_pipeline` exits due to the interrupt event, it sends `tts_interrupted`:
 
@@ -485,12 +515,13 @@ After the interrupt, `_pcm_buffer` is cleared and the session is ready for the n
 | Mic → UDP delivery | ~1–5 ms | Loopback/LAN; dominated by OS audio buffer |
 | ICE + DTLS setup | ~50–200 ms | One-time per session |
 | STT (first partial) | ~300–600 ms | Depends on buffer fill time and model size |
-| Silence debounce | 350 ms | Configurable via `STREAM_LLM_SILENCE_MS` |
+| VAD speech-end decision | ~600 ms silence | Default `STREAM_VAD_MIN_SILENCE_MS` |
+| Debounce fallback | 950 ms | Used when VAD endpointing does not fire cleanly |
 | LLM first token | ~100–500 ms | Depends on model and hardware |
 | LLM first sentence boundary | ~300–1000 ms | Depends on response style and model |
 | TTS synthesis (one sentence) | ~100–400 ms | Kokoro MLX on Apple Silicon |
 | DataChannel → AudioContext | ~5–20 ms | JSON parse + WAV decode |
-| **Total (first speech heard)** | **~1.5–3 s** | From end of user utterance |
+| **Total (first speech heard)** | **~1.3–3 s** | From end of user utterance |
 
 The sentence-streaming pipeline overlaps TTS synthesis with LLM generation. By the time sentence 2 is ready from the LLM, sentence 1 is already playing. The user hears the reply start well before the full LLM response is complete.
 
@@ -503,8 +534,10 @@ The design choices are interconnected:
 - **WebRTC + Opus** provides compressed, low-latency audio with browser-native echo cancellation — the single most important preprocessing step for a hands-free agent
 - **RTP over UDP** lets media arrive with minimal buffering; a dropped packet is a small audio artifact, not a stall
 - **RTCDataChannel** reuses the same encrypted UDP path as the media, so signalling messages have the same low-latency properties as the audio
-- **Server-side VAD on decoded frames** fires the interrupt without a browser round-trip — critical for sub-100 ms barge-in feel
+- **Dedicated streaming Silero VAD** gives the server a real speech-start/speech-end signal instead of guessing only from transcript pauses
+- **Debounce fallback** keeps the turn moving even when VAD end does not fire cleanly on a noisy or clipped utterance
 - **Sentence-streaming TTS** means the agent starts speaking ~1 sentence of LLM time after you finish talking, not one full LLM response time
+- **Welcome-message streaming** reuses the same TTS/audio queue path as normal replies, which keeps the first-turn UX consistent
 - **asyncio + executor** keeps the event loop responsive to interrupt signals even while the synchronous STT inference is running
 
 The result is not one model doing everything — it is five stages (AEC, STT, LLM, TTS, playback) each doing one job well, stitched together with careful async orchestration so the handoffs feel invisible.
