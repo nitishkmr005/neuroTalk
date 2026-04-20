@@ -182,6 +182,7 @@ export function VoiceAgentConsole() {
   const errorRef = useRef<string | null>(null);
   const amplitudeRef = useRef(0.08);
   const waveLevelsRef = useRef(initialWaveLevels);
+  const startAttemptRef = useRef(0);
 
   useEffect(() => {
     const saved = localStorage.getItem("nt-theme");
@@ -364,6 +365,13 @@ export function VoiceAgentConsole() {
   };
 
   const startStreaming = async () => {
+    if (isConnecting || isRecordingRef.current) {
+      return;
+    }
+
+    const startAttemptId = startAttemptRef.current + 1;
+    startAttemptRef.current = startAttemptId;
+
     try {
       // Stop any audio still playing from a previous session before starting a new one.
       stopAudioGraph();
@@ -391,7 +399,14 @@ export function VoiceAgentConsole() {
           autoGainControl: true,
         },
       });
+      if (startAttemptRef.current !== startAttemptId) {
+        stream.getTracks().forEach((track) => track.stop());
+        return;
+      }
       mediaStreamRef.current = stream;
+      setIsRecording(true);
+      isRecordingRef.current = true;
+      startTransition(() => { setMode("listening"); });
 
       // ── WebRTC path ────────────────────────────────────────────────────────
       if (transportType === "webrtc") {
@@ -621,6 +636,9 @@ export function VoiceAgentConsole() {
         };
 
         transport.onClose = () => {
+          if (startAttemptRef.current !== startAttemptId) {
+            return;
+          }
           streamReadyRef.current = false;
           webrtcRef.current = null;
           setIsConnecting(false);
@@ -632,6 +650,10 @@ export function VoiceAgentConsole() {
         try {
           await transport.connect(stream);
         } catch (connectErr) {
+          if (startAttemptRef.current !== startAttemptId) {
+            transport.close();
+            return;
+          }
           const msg =
             connectErr instanceof Error ? connectErr.message : "WebRTC connection failed.";
           errorRef.current = msg;
@@ -640,6 +662,11 @@ export function VoiceAgentConsole() {
           setIsRecording(false);
           setIsFinalizing(false);
           stopAudioGraph();
+          return;
+        }
+
+        if (startAttemptRef.current !== startAttemptId) {
+          transport.close();
           return;
         }
 
@@ -688,8 +715,6 @@ export function VoiceAgentConsole() {
 
         transport.send({ type: "start", sample_rate: rtcAudioCtx.sampleRate });
         setIsConnecting(false);
-        setIsRecording(true);
-        isRecordingRef.current = true;
         startTransition(() => { setMode("listening"); });
         return;
       }
@@ -702,6 +727,12 @@ export function VoiceAgentConsole() {
       streamReadyRef.current = false;
 
       socket.onopen = async () => {
+        if (startAttemptRef.current !== startAttemptId) {
+          normalCloseRef.current = true;
+          socket.close();
+          return;
+        }
+
         const audioContext = new AudioContext();
         audioContextRef.current = audioContext;
 
@@ -762,8 +793,6 @@ export function VoiceAgentConsole() {
         );
 
         setIsConnecting(false);
-        setIsRecording(true);
-        isRecordingRef.current = true;
         startTransition(() => {
           setMode("listening");
         });
@@ -956,6 +985,9 @@ export function VoiceAgentConsole() {
       };
 
       socket.onerror = () => {
+        if (startAttemptRef.current !== startAttemptId) {
+          return;
+        }
         const message = `Could not connect to backend stream at ${websocketUrl}. Run make dev and retry.`;
         errorRef.current = message;
         setError(message);
@@ -967,6 +999,9 @@ export function VoiceAgentConsole() {
       };
 
       socket.onclose = (event) => {
+        if (startAttemptRef.current !== startAttemptId) {
+          return;
+        }
         streamReadyRef.current = false;
         websocketRef.current = null;
         setIsConnecting(false);
@@ -984,6 +1019,9 @@ export function VoiceAgentConsole() {
         stopAudioGraph();
       };
     } catch (caughtError) {
+      if (startAttemptRef.current !== startAttemptId) {
+        return;
+      }
       const message = caughtError instanceof Error ? caughtError.message : "Microphone access failed.";
       setError(message);
       errorRef.current = message;
@@ -1006,6 +1044,9 @@ export function VoiceAgentConsole() {
   }, [messages]);
 
   const stopStreaming = () => {
+    startAttemptRef.current += 1;
+    const wasConnecting = isConnecting;
+    setIsConnecting(false);
     setIsRecording(false);
     isRecordingRef.current = false;
     normalCloseRef.current = true;
@@ -1024,10 +1065,20 @@ export function VoiceAgentConsole() {
     }
 
     // WebSocket: send "stop" and let the existing WS pipeline finalise.
+    const socket = websocketRef.current;
+    if (wasConnecting) {
+      websocketRef.current = null;
+      socket?.close();
+      stopAudioGraph();
+      setIsFinalizing(false);
+      isFinalizingRef.current = false;
+      startTransition(() => { setMode("listening"); });
+      return;
+    }
+
     setIsFinalizing(true);
     isFinalizingRef.current = true;
     stopAudioGraph();
-    const socket = websocketRef.current;
     if (socket?.readyState === WebSocket.OPEN) {
       socket.send(JSON.stringify({ type: "stop" }));
       startTransition(() => {
@@ -1041,8 +1092,8 @@ export function VoiceAgentConsole() {
   };
 
   const activeMode = modeConfig[mode];
-  const controlLabel = isRecording ? "Stop Streaming" : isConnecting ? "Connecting..." : "Start Live Transcription";
-  const controlDisabled = isConnecting || isFinalizing;
+  const controlLabel = isRecording || isConnecting ? "Stop Streaming" : "Start Live Transcription";
+  const controlDisabled = isFinalizing;
   const orbScale = (1 + amplitude * 0.42).toFixed(3);
   const orbGlow = (0.45 + amplitude * 1.3).toFixed(3);
   const orbTilt = `${(amplitude * 18).toFixed(2)}deg`;
@@ -1165,7 +1216,7 @@ export function VoiceAgentConsole() {
                   isConnecting ? "orbital-core--connecting" : "",
                 ].filter(Boolean).join(" ")}
                 disabled={controlDisabled}
-                onClick={isRecording ? stopStreaming : () => void startStreaming()}
+                onClick={isRecording || isConnecting ? stopStreaming : () => void startStreaming()}
                 aria-label={controlLabel}
                 style={
                   {
@@ -1206,7 +1257,9 @@ export function VoiceAgentConsole() {
                   ? <span className="is-error">{error}</span>
                   : isFinalizing
                     ? "Processing…"
-                    : isRecording
+                    : isConnecting && !isRecording
+                      ? "Starting microphone…"
+                      : isRecording
                       ? "Tap to stop"
                       : "Tap to speak"}
               </p>
