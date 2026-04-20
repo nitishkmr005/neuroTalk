@@ -34,14 +34,14 @@ class Settings(BaseSettings):
 
     # ── Streaming / Debounce ──────────────────────────────────────────────────
     # How often to emit a partial STT result (ms). Lower = faster LLM trigger.
-    stream_emit_interval_ms: int = 700
+    stream_emit_interval_ms: int = 250
     # Minimum audio buffer before emitting (ms). Lower = faster, more empty results.
-    stream_min_audio_ms: int = 600
+    stream_min_audio_ms: int = 300
     # Minimum transcript length before firing the LLM (chars).
     stream_llm_min_chars: int = 8
     # Silence window before firing the LLM (ms). Lower = more responsive,
     # higher = avoids splitting one utterance into two replies.
-    stream_llm_silence_ms: int = 700
+    stream_llm_silence_ms: int = 350
 
     # ── TTS ───────────────────────────────────────────────────────────────────
     # Backend: kokoro | chatterbox | qwen | vibevoice | omnivoice
