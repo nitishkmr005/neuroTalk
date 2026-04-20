@@ -22,7 +22,8 @@ from config.settings import get_settings
 
 _PAUSE_PATTERN = re.compile(
     r"^\s*(wait|hold on|hold up|one moment|one sec(?:ond)?|just a (?:moment|second|sec)|"
-    r"give me a (?:second|moment|sec)|hang on|please wait|just wait|ok wait)\s*[.!?,]?\s*$",
+    r"give me a (?:second|moment|sec)|hang on|please wait|just wait|ok wait|okay wait|"
+    r"stop|stop it|stop please|please stop|ok stop|okay stop)\s*[.!?,]?\s*$",
     re.IGNORECASE,
 )
 _SENT_BOUNDARY = re.compile(r"[.!?](?:\s|$)")
@@ -238,6 +239,9 @@ class WebRTCSession:
         """Emit a partial STT result when buffer and time thresholds are met."""
         if not self._pcm_buffer:
             return
+        if self._llm_task and not self._llm_task.done():
+            self._last_emit_at = perf_counter()
+            return
         buffered_ms = len(self._pcm_buffer) / 2 / self._sample_rate * 1000
         now = perf_counter()
         if not (
@@ -248,6 +252,13 @@ class WebRTCSession:
 
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(None, self._transcribe_buffer)
+        if self._llm_task and not self._llm_task.done():
+            self._last_emit_at = perf_counter()
+            logger.info(
+                "session_id={} event=partial_stt_skipped reason=llm_in_flight",
+                self.session_id,
+            )
+            return
         current_text = str(result.get("text", ""))
         if current_text != self._last_text_sent:
             await self._send_json({"type": "partial", **result})

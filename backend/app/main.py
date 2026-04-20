@@ -27,7 +27,8 @@ settings = get_settings()
 
 _PAUSE_PATTERN = re.compile(
     r"^\s*(wait|hold on|hold up|one moment|one sec(?:ond)?|just a (?:moment|second|sec)|"
-    r"give me a (?:second|moment|sec)|hang on|please wait|just wait|ok wait)\s*[.!?,]?\s*$",
+    r"give me a (?:second|moment|sec)|hang on|please wait|just wait|ok wait|okay wait|"
+    r"stop|stop it|stop please|please stop|ok stop|okay stop)\s*[.!?,]?\s*$",
     re.IGNORECASE,
 )
 
