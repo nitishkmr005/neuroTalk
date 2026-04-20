@@ -1,6 +1,6 @@
 # NeuroTalk
 
-Real-time voice agent console — live speech transcription with AI-assisted responses and interrupt handling.
+Real-time voice agent console with selectable `WebRTC` and `WebSocket` transports, live transcription, sentence-streamed AI replies, and interrupt handling.
 
 ![NeuroTalk voice agent console](docs/images/neurotalk-console-preview.png)
 
@@ -13,6 +13,15 @@ Because text streaming and voice streaming are synchronized, TTS starts speaking
 
 Designed for two contexts: **customer-facing** (direct query answering) and **associate-facing** (live call assist with database/article lookup). A voice response layer with emotional expressiveness is on the roadmap.
 
+## Highlights
+
+- `WebRTC` is the default live transport, with `WebSocket` kept as a fallback/debug path.
+- Persistent multi-turn sessions keep conversation history in the same live voice call.
+- Sentence-streaming TTS starts playback before the full LLM response finishes.
+- Real-time barge-in stops playback when the user speaks over the assistant.
+- A spoken welcome greeting is streamed as soon as the live session is ready.
+- Dedicated streaming `Silero VAD` improves speech start/end detection, endpointing, and barge-in timing.
+
 ## Stack
 
 | Layer | Tech |
@@ -24,7 +33,7 @@ Designed for two contexts: **customer-facing** (direct query answering) and **as
 | STT | faster-whisper (`small`, int8, CPU) — via CTranslate2 |
 | LLM | Ollama (local) — `llama3.2:3b` (default) |
 | TTS | Kokoro 82M MLX (default) · Chatterbox Turbo · Qwen · VibeVoice |
-| Server-side VAD | Energy RMS on decoded Opus frames (aiortc/av pipeline) |
+| Server-side VAD | `Silero VAD` for streaming endpointing/barge-in · RMS fallback when disabled |
 | ICE / NAT traversal | STUN (`stun.l.google.com:19302`) · Vanilla ICE (full gather before offer) |
 | Config | Pydantic Settings + `.env` |
 | Logging | Loguru — colorful terminal + rotating JSON files |
@@ -62,6 +71,8 @@ NeuroTalk supports two transport modes selectable in the UI:
 
 WebRTC is recommended: browser-native echo cancellation, noise suppression, and auto-gain control are applied before encoding. The data channel carries the same JSON protocol as the WebSocket path, so the frontend message handler is shared between both modes.
 
+The frontend exposes a transport toggle, and the WebRTC path keeps a long-lived peer connection open so follow-up turns reuse the same session instead of reconnecting every request.
+
 ## Environment Variables
 
 Copy `backend/.env.example` → `backend/.env` and adjust as needed.
@@ -77,7 +88,14 @@ Copy `backend/.env.example` → `backend/.env` and adjust as needed.
 | `TTS_BACKEND` | `kokoro` | TTS engine — see below |
 | `STREAM_EMIT_INTERVAL_MS` | `250` | Minimum gap between partial STT emits |
 | `STREAM_MIN_AUDIO_MS` | `300` | Minimum buffered audio before STT runs |
-| `STREAM_LLM_SILENCE_MS` | `350` | Silence window before triggering the LLM |
+| `STREAM_LLM_MIN_CHARS` | `8` | Minimum transcript length before starting the LLM |
+| `STREAM_LLM_SILENCE_MS` | `950` | Debounce fallback when VAD end does not fire cleanly |
+| `STREAM_VAD_ENABLED` | `true` | Enable dedicated streaming voice activity detection |
+| `STREAM_VAD_THRESHOLD` | `0.4` | Speech probability threshold for VAD start detection |
+| `STREAM_VAD_MIN_SILENCE_MS` | `600` | Required silence before VAD emits speech end |
+| `STREAM_VAD_SPEECH_PAD_MS` | `200` | Extra speech padding kept around VAD boundaries |
+| `STREAM_VAD_FRAME_SAMPLES` | `512` | Frame size fed into the streaming VAD at 16 kHz |
+| `WELCOME_MESSAGE` | `Hello! I'm your Neurotalk voice assistant...` | Spoken greeting streamed on session start; empty disables it |
 
 ## Switching LLM Models
 
@@ -177,11 +195,11 @@ make dev TTS_BACKEND=chatterbox
 neuroTalk/
 ├── backend/              # FastAPI backend
 │   ├── app/
-│   │   ├── main.py       # WebSocket route + streaming pipeline
+│   │   ├── main.py       # WebSocket route + app startup/warmup
 │   │   ├── webrtc/       # WebRTC transport (NEW)
 │   │   │   ├── router.py     # POST /webrtc/offer, DELETE /webrtc/session/{id}
 │   │   │   └── session.py    # RTCPeerConnection, RTP consumer, VAD, STT→LLM→TTS
-│   │   ├── services/     # STT, LLM, TTS service modules
+│   │   ├── services/     # STT, LLM, TTS, VAD service modules
 │   │   ├── prompts/      # System prompts
 │   │   ├── utils/        # Shared utilities (emotion tag cleaning, etc.)
 │   │   └── models.py     # Pydantic response models
