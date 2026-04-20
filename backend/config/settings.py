@@ -42,6 +42,12 @@ class Settings(BaseSettings):
     # Silence window before firing the LLM (ms). Lower = more responsive,
     # higher = avoids splitting one utterance into two replies.
     stream_llm_silence_ms: int = 950
+    # Dedicated streaming VAD for endpointing and barge-in.
+    stream_vad_enabled: bool = True
+    stream_vad_threshold: float = 0.4
+    stream_vad_min_silence_ms: int = 600
+    stream_vad_speech_pad_ms: int = 200
+    stream_vad_frame_samples: int = 512
 
     # ── TTS ───────────────────────────────────────────────────────────────────
     # Backend: kokoro | chatterbox | qwen | vibevoice | omnivoice
