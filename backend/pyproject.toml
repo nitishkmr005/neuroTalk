@@ -4,6 +4,8 @@ version = "0.1.0"
 description = "Minimal STT backend for NeuroTalk."
 requires-python = ">=3.11"
 dependencies = [
+  "aiortc>=1.9.0",
+  "av>=13.0.0",
   "fastapi>=0.115.0",
   "faster-whisper>=1.1.1",
   "loguru>=0.7.3",
@@ -13,6 +15,7 @@ dependencies = [
   "pydantic-settings>=2.7.1",
   "python-dotenv>=1.0.1",
   "python-multipart>=0.0.20",
+  "silero-vad>=6.2.1",
   "sounddevice>=0.5.2",
   "uvicorn>=0.34.0",
   "websockets>=15.0.1",

@@ -1,480 +1,513 @@
-# NeuroTalk: How a Local Voice Agent Works
+# NeuroTalk: End-to-End Audio Pipeline
 
-If you are new to voice agents, the cleanest mental model is this:
-
-1. The microphone captures audio.
-2. Speech-to-text turns audio into text.
-3. A language model reads that text and writes a reply.
-4. Text-to-speech turns the reply back into audio.
-5. The app manages timing, interruption, and streaming so the whole thing feels conversational.
-
-NeuroTalk follows exactly that pipeline. In this repo, speech recognition is handled by Whisper through `faster-whisper`, reply generation is handled by an Ollama-served LLM such as `gemma3:1b`, and speech synthesis is handled by Kokoro or Chatterbox in `backend/app/services/tts.py`. The repo also declares Qwen TTS, VibeVoice, and OmniVoice as optional backends in dependency groups, but the current `TTSService` only loads Kokoro or Chatterbox. Sources for the training claims and model descriptions are listed at the end, and every non-code claim below is tied to those sources.
+This article explains every step NeuroTalk takes from the moment sound hits your microphone to the moment you hear the agent's reply — and how interruption is handled in between. The two directions are covered separately: **client → server** (your voice going in) and **server → client** (the agent's voice coming back).
 
 ---
 
-## The pipeline in one example
+## The shape of the system
 
-Imagine the user says:
+```
+Browser                               Server (FastAPI + aiortc)
+──────────────────────────────────    ────────────────────────────────────
+Mic hardware
+  └─ getUserMedia (browser API)
+       ├─ echo cancellation
+       ├─ noise suppression
+       └─ auto-gain control
+            │
+            ▼
+     MediaStreamTrack (PCM)
+            │
+     RTCPeerConnection
+            │ Opus encode → RTP frames
+            │ DTLS-SRTP over UDP
+            ▼
+                                      aiortc DTLS stack
+                                        └─ SRTP decrypt → RTP demux
+                                             └─ Opus decode (libav)
+                                                  └─ av.AudioResampler
+                                                       └─ PCM 16 kHz buffer
+                                                            │
+                                                     Server-side VAD
+                                                            │
+                                                      faster-whisper STT
+                                                            │
+                                                       Ollama LLM
+                                                    (sentence streaming)
+                                                            │
+                                                        TTS synthesis
+                                                     (per sentence, async)
+                                                            │
+            RTCDataChannel ◄────── JSON tts_audio chunks ──┘
+            │ (base64 WAV)
+            ▼
+     AudioContext.decodeAudioData
+            └─ TTS audio queue
+                 └─ sequential playback
+```
 
-> "Can you help me reset my password?"
-
-NeuroTalk processes that utterance like this:
-
-1. The browser streams PCM audio frames over a WebSocket.
-2. The backend repeatedly retranscribes the buffered audio and emits partial text such as `can you`, then `can you help`, then `can you help me reset my password`.
-3. Once the partial text looks stable enough, the backend starts the LLM call before the user fully finishes.
-4. As the LLM streams its answer, the backend looks for the first sentence boundary.
-5. As soon as that first sentence is complete, TTS starts synthesizing it in parallel with the rest of the LLM output.
-6. If the user speaks over the reply, the app cancels the running LLM/TTS work and starts listening for the next turn.
-
-That is the high-level behavior. The rest of the article breaks down how each model is trained and how each stage is inferenced in this codebase.
+NeuroTalk also supports a **WebSocket** transport. In that mode, the browser sends raw Float32 PCM over binary WebSocket frames instead of RTP/WebRTC. The server-side pipeline from STT onward is identical, and the same JSON message schema is used for the return direction. The rest of this article focuses on the WebRTC path, which is the default.
 
 ---
 
-## Step 1: audio enters through one WebSocket
+## Part 1: Client → Server
 
-NeuroTalk uses one WebSocket route, `/ws/transcribe`, to move the whole conversation loop. The browser sends audio bytes plus control messages such as `start`, `interrupt`, and `stop`. The backend sends transcript updates, streamed LLM text, and TTS audio back to the client.
+### Step 1 — Microphone capture and browser audio processing
 
-The live loop is in [`backend/app/main.py`](../backend/app/main.py):
+Everything starts with a single browser API call:
 
-```python
-@app.websocket("/ws/transcribe")
-async def transcribe_stream(websocket: WebSocket) -> None:
-    await websocket.accept()
-    ...
-    while True:
-        message = await websocket.receive()
-        ...
-        if message.get("bytes") is None or sample_rate is None:
-            continue
-
-        pcm_buffer.extend(message["bytes"])
-        chunk_count += 1
-        buffered_audio_ms = len(pcm_buffer) / 2 / sample_rate * 1000
+```typescript
+const stream = await navigator.mediaDevices.getUserMedia({
+  audio: {
+    echoCancellation: true,
+    noiseSuppression: true,
+    autoGainControl: true,
+  },
+});
 ```
 
-What matters here:
+These three constraints activate the browser's built-in audio processing stack. They run before any application code sees the signal, inside the browser's audio engine (Chrome uses WebRTC's `audio_processing` module; Safari uses CoreAudio).
 
-- `pcm_buffer` stores the raw incoming speech for the current turn.
-- `sample_rate` tells the backend how to interpret those PCM bytes.
-- The backend keeps extending the same buffer so STT can re-run on progressively larger audio.
+**Echo cancellation (AEC)** removes the agent's own voice from the mic signal. Without it, if your speakers are loud, the mic would pick up the TTS output and the STT would transcribe the agent talking to itself. AEC works by keeping a reference copy of the audio being played out and subtracting it (adaptively) from the mic input. The subtraction is adaptive because speaker position, room reflections, and volume change continuously.
 
-That buffering strategy is why the app can show live partial transcripts instead of waiting for a full upload.
+**Noise suppression (NS)** attenuates stationary background noise — fans, keyboard clicks, HVAC rumble. It uses a spectral subtraction approach: estimate which frequency bands are consistently noisy and reduce them on every frame.
+
+**Auto-gain control (AGC)** normalises the microphone level so whispered and loud speech produce similar amplitude at the output. It applies a slowly adjusting gain so the STT model always sees audio in the amplitude range it was trained on.
+
+The result is a `MediaStream` containing a `MediaStreamTrack` of clean, normalised mono audio ready for encoding.
 
 ---
 
-## Step 2: STT with Whisper via `faster-whisper`
+### Step 2 — WebRTC peer connection setup and SDP negotiation
 
-### How Whisper is trained
+The frontend creates an `RTCPeerConnection`, adds the mic track, and opens a data channel for signalling:
 
-Whisper was trained by OpenAI on 680,000 hours of weakly supervised multilingual and multitask audio-text data. The core idea is simple: give the model audio and train it to predict the transcript tokens. Because the training corpus is large and diverse, the model generalizes better than narrow speech recognizers that were trained on smaller, more curated datasets.
-
-Beginner example:
-
-- Training input: audio of someone saying "my order number is 4521"
-- Training target: `my order number is 4521`
-
-After enough examples like that, the model learns a statistical mapping from acoustic patterns to text tokens.
-
-### How STT inference works in NeuroTalk
-
-The STT service lives in [`backend/app/services/stt.py`](../backend/app/services/stt.py):
-
-```python
-self._model = WhisperModel(
-    self.settings.stt_model_size,
-    device=self.settings.stt_device,
-    compute_type=self.settings.stt_compute_type,
-)
-
-segments, info = model.transcribe(
-    str(file_path),
-    beam_size=self.settings.stt_beam_size,
-    language=self.settings.stt_language or None,
-    vad_filter=self.settings.stt_vad_filter,
-)
+```typescript
+// frontend/components/webrtc-transport.ts
+const pc = new RTCPeerConnection({ iceServers: STUN_SERVERS });
+for (const track of stream.getAudioTracks()) {
+  pc.addTrack(track, stream);
+}
+const dc = pc.createDataChannel("signaling", { ordered: true });
 ```
 
-Parameter breakdown:
+Adding the audio track triggers the browser's codec negotiation machinery. The browser announces in its SDP offer that it can send audio using **Opus** (it may offer other codecs too, but aiortc on the server negotiates Opus).
 
-- `stt_model_size`: which Whisper checkpoint to load. The repo default is `"small"`.
-- `device`: where inference runs. The repo default is `"cpu"`.
-- `compute_type`: numeric precision. The repo default is `"int8"` for lower memory use and faster CPU inference.
-- `beam_size`: decoding width. The repo default is `1`, which means greedy decoding rather than a wider beam search.
-- `language`: optional language hint. Empty means auto-detect.
-- `vad_filter`: whether to filter non-speech and silence before transcription.
+**SDP (Session Description Protocol)** is a text format that describes the session: what codecs are available, what network addresses to try, what encryption keys to use. The browser generates an SDP offer and the server responds with an SDP answer. Together they agree on exactly one codec, one set of ICE candidates, and one DTLS certificate fingerprint before any media flows.
 
-The defaults are defined in [`backend/config/settings.py`](../backend/config/settings.py):
+NeuroTalk uses **vanilla ICE** (all candidates gathered before the offer is sent):
 
-```python
-stt_model_size: str = "small"
-stt_device: str = "cpu"
-stt_compute_type: str = "int8"
-stt_beam_size: int = 1
-stt_vad_filter: bool = True
+```typescript
+// Wait for all ICE candidates to be embedded in the local SDP
+await this._waitForIceGathering(4000);
+// Then POST the complete offer
+const resp = await fetch(`${backendUrl}/webrtc/offer`, {
+  method: "POST",
+  body: JSON.stringify({ sdp: pc.localDescription!.sdp, type: "offer" }),
+});
 ```
 
-In the streaming loop, NeuroTalk does not feed raw live audio directly into Whisper token by token. Instead, it buffers audio, writes a WAV, retranscribes, and only emits a new partial when the text changes:
+Gathering all candidates first means the server receives a self-contained offer SDP with every candidate already embedded. No trickle-ICE endpoint is needed. The server completes SDP exchange in one HTTP round-trip.
+
+On the server side, `POST /webrtc/offer` creates a `WebRTCSession` and returns the answer:
+
+```python
+# backend/app/webrtc/router.py
+session = WebRTCSession(session_id)
+answer = await session.setup(body.sdp, body.type)
+# answer.sdp is sent back to the browser
+```
+
+```python
+# backend/app/webrtc/session.py
+async def setup(self, offer_sdp: str, offer_type: str) -> RTCSessionDescription:
+    await self.pc.setRemoteDescription(RTCSessionDescription(sdp=offer_sdp, type=offer_type))
+    answer = await self.pc.createAnswer()
+    await self.pc.setLocalDescription(answer)
+    return self.pc.localDescription
+```
+
+After the browser sets the answer as its remote description, both sides start the ICE connectivity checks and DTLS handshake.
+
+---
+
+### Step 3 — ICE connectivity checks and NAT traversal
+
+**ICE (Interactive Connectivity Establishment)** is the protocol that finds a working network path between the browser and the server. Both sides gather **candidates** — possible addresses where they can be reached:
+
+- **Host candidates**: local LAN addresses (e.g. `192.168.1.5:50000`)
+- **Server-reflexive (srflx) candidates**: the public address seen by a STUN server (tells you what address the NAT gateway maps you to)
+- **Relay candidates**: addresses on a TURN relay server (fallback when direct paths fail)
+
+NeuroTalk uses STUN for srflx discovery (`stun.l.google.com:19302`). For localhost and simple NAT environments, host candidates usually succeed directly.
+
+ICE connectivity checks are STUN binding requests sent on every candidate pair. Once a request and its response arrive successfully, that pair is usable. ICE selects the highest-priority working pair as the nominated path.
+
+For most developer setups (browser and backend on the same machine or same LAN), ICE completes in milliseconds via a host candidate pair. No STUN request ever leaves the local network.
+
+---
+
+### Step 4 — DTLS handshake and SRTP keying
+
+UDP is unreliable and unencrypted by default. WebRTC mandates encryption on all media. The mechanism is **DTLS-SRTP**:
+
+1. **DTLS (Datagram TLS)**: a TLS handshake run over UDP. Each side proves its identity using the certificate fingerprint embedded in the SDP. The handshake produces a shared secret.
+2. **SRTP (Secure RTP)**: the shared secret from DTLS is used to derive keys for encrypting and authenticating RTP packets. Media is never sent in the clear.
+
+aiortc handles the DTLS stack entirely on the Python side. From the application's perspective, audio frames arrive already decrypted as `av.AudioFrame` objects.
+
+---
+
+### Step 5 — Opus encoding and RTP framing (browser side)
+
+Once ICE and DTLS complete, the browser starts sending audio. The processing chain is:
+
+```
+MediaStreamTrack (Float32, 48 kHz, AEC/NS/AGC applied)
+    └─ Browser Opus encoder
+         └─ Opus compressed frame (~20 ms, variable bitrate)
+              └─ RTP packet (RFC 3550)
+                   └─ DTLS-SRTP encryption
+                        └─ UDP datagram → network
+```
+
+**Opus** is a lossy audio codec designed for real-time communication. Key properties:
+
+- Variable bitrate, typically 6–128 kbps (WebRTC defaults to ~32 kbps for mono speech)
+- 20 ms frames by default (960 samples at 48 kHz per frame)
+- Built-in voice activity detection and discontinuous transmission (DTX) — silent frames generate minimal data
+- Surpasses older speech codecs (G.711, G.729) in quality at the same bitrate
+
+**RTP (Real-time Transport Protocol, RFC 3550)** is the standard envelope for media over UDP. Each RTP packet carries:
+
+- **SSRC (Synchronization Source)**: 32-bit random ID identifying this stream
+- **Sequence number**: 16-bit counter, increments per packet; receiver uses this to detect loss and reorder out-of-order packets
+- **Timestamp**: 32-bit media clock; for Opus at 48 kHz, advances by 960 per 20 ms frame; receiver uses this for jitter correction and lip sync
+- **Payload type**: identifies the codec (Opus is negotiated dynamically during SDP)
+- **Payload**: the Opus-compressed audio data
+
+RTP itself does not guarantee delivery or ordering — that is UDP's responsibility (which is: none). The receiver handles loss gracefully by letting the codec do concealment on missing frames.
+
+---
+
+### Step 6 — Server receives and decodes RTP
+
+aiortc's DTLS/ICE stack accepts the incoming UDP datagrams, decrypts SRTP, and surfaces `av.AudioFrame` objects to Python code via the `on("track")` callback:
+
+```python
+# backend/app/webrtc/session.py
+@self.pc.on("track")
+def on_track(track: MediaStreamTrack) -> None:
+    if track.kind == "audio":
+        self._audio_task = asyncio.ensure_future(self._consume_audio(track))
+```
+
+The `_consume_audio` coroutine loops on `track.recv()`, which returns one decoded `av.AudioFrame` per call — already Opus-decoded by libav (PyAV) into PCM samples at 48 kHz.
+
+The server then resamples from 48 kHz to 16 kHz because faster-whisper (and all Whisper checkpoints) expect 16 kHz mono audio:
+
+```python
+resampler = av.AudioResampler(format="s16", layout="mono", rate=16_000)
+
+while not self._closed:
+    frame = await asyncio.wait_for(track.recv(), timeout=5.0)
+    for resampled in resampler.resample(frame):
+        pcm = resampled.to_ndarray().tobytes()
+        self._pcm_buffer.extend(pcm)
+```
+
+`av.AudioResampler` uses libswresample under the hood (part of FFmpeg). It converts the sample format from the codec's float planar to signed 16-bit interleaved, and downsamples the rate using a polyphase filter bank.
+
+The result stored in `_pcm_buffer` is raw **PCM16 mono at 16 kHz** — two bytes per sample, signed little-endian, no header. This is the native input format faster-whisper expects.
+
+---
+
+### Step 7 — Server-side VAD (Voice Activity Detection) for barge-in
+
+While the agent is speaking (`_is_agent_speaking = True`), the server runs a lightweight energy-based VAD on every decoded frame:
+
+```python
+if self._is_agent_speaking:
+    samples = resampled.to_ndarray().astype(np.float32) / 32_768.0
+    rms = float(np.sqrt(np.mean(samples ** 2)))
+    if rms > _BARGE_IN_THRESHOLD:   # 0.08 normalised
+        self._barge_in_count += 1
+        if self._barge_in_count >= _BARGE_IN_FRAMES:  # 2 consecutive frames
+            asyncio.ensure_future(self._handle_interrupt())
+    else:
+        self._barge_in_count = 0
+```
+
+**Why server-side VAD instead of relying only on the frontend?**
+
+The frontend also detects barge-in via its `ScriptProcessorNode` and sends an `interrupt` message. But there is latency between when the user speaks and when that WebSocket message arrives. Server-side VAD fires the interrupt directly on the audio consumer task — no round-trip to the browser required. The threshold (0.08 RMS) is lower than the frontend's 0.15 because the server sees raw Opus-decoded PCM without browser AGC, so speech-level values are naturally lower.
+
+Two consecutive high-energy frames are required before triggering (`_BARGE_IN_FRAMES = 2`). This filters out click transients and encoding artifacts that might cause false positives on a single frame.
+
+---
+
+### Step 8 — STT with faster-whisper
+
+Once enough audio has accumulated, the server writes the PCM buffer to a temporary WAV file and runs faster-whisper:
+
+```python
+def _transcribe_buffer(self) -> dict:
+    with wave.open(str(temp_path), "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(self._sample_rate)
+        wf.writeframes(bytes(self._pcm_buffer))
+
+    service = get_stt_service()
+    result = service.transcribe(file_path=temp_path, ...)
+```
+
+This runs in a thread pool executor (`loop.run_in_executor`) so the asyncio event loop stays responsive to incoming RTP frames and interrupt signals during the synchronous whisper inference call.
+
+**Why write a WAV instead of streaming to the model?**
+
+Whisper is not a streaming model. It was trained on fixed-length mel spectrograms (30-second windows). `faster-whisper` exposes a `transcribe()` function that takes a file path or audio array. Writing a WAV and re-running transcription on a growing buffer is the standard streaming pattern for Whisper: the same audio is re-transcribed each time more speech arrives, producing progressively longer and more accurate partial results.
+
+The emission is rate-limited to avoid redundant inference:
 
 ```python
 should_emit = (
-    buffered_audio_ms >= settings.stream_min_audio_ms
-    and ((now - last_emit_at) * 1000) >= settings.stream_emit_interval_ms
-)
-
-result_payload = transcribe_stream_buffer(...)
-current_text = str(result_payload["text"])
-if current_text != last_text_sent:
-    await send_json({"type": "partial", **result_payload})
-    last_text_sent = current_text
-```
-
-Parameter breakdown:
-
-- `stream_min_audio_ms`: minimum buffered speech before trying STT. Default `600`.
-- `stream_emit_interval_ms`: how often the backend is allowed to emit a fresh partial. Default `800`.
-
-This creates the familiar voice-agent behavior:
-
-- at first: `reset`
-- then: `reset my`
-- then: `reset my password`
-
-That rolling hypothesis behavior is one of the key differences between batch transcription and interactive transcription.
-
-Two implementation details are worth calling out:
-
-1. NeuroTalk uses `faster-whisper`, which is Whisper implemented on top of CTranslate2. SYSTRAN documents that this gives faster inference and supports reduced precision such as `int8`.
-2. NeuroTalk enables `vad_filter=True`, which matters in practice because silence and room noise can otherwise turn into spurious transcript fragments that trigger unnecessary LLM calls.
-
----
-
-## Step 3: deciding when to call the LLM
-
-A voice agent feels slow if it waits for the user to fully stop, then starts thinking. NeuroTalk avoids that by starting LLM work from a stable partial transcript instead of waiting only for the final transcript.
-
-The debounce logic is in [`backend/app/main.py`](../backend/app/main.py):
-
-```python
-if silence_debounce_task is not None and not silence_debounce_task.done():
-    silence_debounce_task.cancel()
-silence_debounce_task = asyncio.create_task(
-    _silence_debounce_then_fire(current_text, "debounced_partial")
+    buffered_ms >= settings.stream_min_audio_ms        # 300 ms minimum
+    and (now - last_emit_at) * 1000 >= settings.stream_emit_interval_ms  # 250 ms gap
 )
 ```
 
-And the delay is controlled by:
+When the transcript changes, a `partial` message is sent over the data channel and a silence debounce timer is (re)started.
 
-```python
-stream_llm_min_chars: int = 8
-stream_llm_silence_ms: int = 900
-```
-
-Parameter breakdown:
-
-- `stream_llm_min_chars`: do not call the LLM for transcript fragments that are too short to be meaningful.
-- `stream_llm_silence_ms`: wait until the partial text stays unchanged long enough to count as a likely pause.
-
-This is not a model-training idea. It is orchestration. But it matters because the perceived speed of a voice agent depends heavily on when the app decides the transcript is "good enough" to start generating a reply.
+**faster-whisper** runs the Whisper model through CTranslate2 — a C++ inference engine that supports int8 quantisation on CPU. The default configuration is `small` model, `int8` compute type, `beam_size=1` (greedy decoding), with `vad_filter=True` to strip silence before feeding to the model.
 
 ---
 
-## Step 4: LLM inference through Ollama
+### Step 9 — Silence debounce and LLM trigger
 
-### How the LLM is trained
-
-The default language model in this repo is `gemma3:1b`. Google describes Gemma 3 as a family of lightweight open models with pre-trained and instruction-tuned variants and at least 128K context. The Gemma 3 technical report states that the models were trained with distillation and then improved with post-training methods for chat, instruction following, math, and multilingual behavior.
-
-At a beginner level, the training picture is:
-
-- pretraining teaches the model to predict the next token from previous text
-- instruction tuning and post-training teach it to act more like an assistant
-
-Example:
-
-- Input text: `can you help me reset my password`
-- Expected behavior after post-training: a short, assistant-style response rather than random continuation text
-
-### How LLM inference works in NeuroTalk
-
-The whole LLM service is intentionally small. It lives in [`backend/app/services/llm.py`](../backend/app/services/llm.py):
+After each new partial transcript, a debounce timer is started. If no new (different) transcript arrives within 350 ms, the timer fires and the LLM is called:
 
 ```python
-async def stream_llm_response(transcript: str) -> AsyncGenerator[str, None]:
-    settings = get_settings()
-    client = AsyncClient(host=settings.ollama_host)
-
-    stream = await client.chat(
-        model=settings.llm_model,
-        messages=[
-            {"role": "system", "content": settings.llm_system_prompt},
-            {"role": "user", "content": transcript},
-        ],
-        stream=True,
-    )
-
-    async for chunk in stream:
-        token: str = chunk.message.content
-        if token:
-            yield token
+async def _silence_debounce_then_fire(self, text: str, trigger: str) -> None:
+    try:
+        await asyncio.sleep(self._settings.stream_llm_silence_ms / 1000)  # 0.35 s
+    except asyncio.CancelledError:
+        return
+    self._schedule_llm(text, trigger)
 ```
 
-Parameter breakdown:
-
-- `ollama_host`: where the local Ollama server is running. Default `http://localhost:11434`.
-- `llm_model`: which local model to use. Default `gemma3:1b`.
-- `llm_system_prompt`: the behavioral instruction that shapes reply style.
-- `stream=True`: tells Ollama to return incremental chunks rather than one final completion.
-
-The corresponding defaults in [`backend/config/settings.py`](../backend/config/settings.py) are:
-
-```python
-ollama_host: str = "http://localhost:11434"
-llm_model: str = "gemma3:1b"
-llm_max_tokens: int = 100
-llm_system_prompt: str = VOICE_AGENT_PROMPT
-```
-
-The important conceptual point is that this is not an end-to-end speech model. The LLM never sees raw audio. It only sees the transcript text produced by STT.
-
-So the actual chain is:
-
-`audio -> transcript -> chat completion`
-
-That boundary explains a lot of failures:
-
-- if STT gets the user intent wrong, the LLM may answer the wrong question
-- if the system prompt is poorly designed, the reply may be too long or too markdown-heavy for TTS
-
-This repo explicitly controls that second problem with a voice-oriented system prompt in [`backend/app/prompts/system.py`](../backend/app/prompts/system.py).
+Every new partial result cancels and restarts the timer. This means the LLM fires shortly after the user pauses, not after a fixed timeout. A minimum length guard (`stream_llm_min_chars = 8`) prevents the LLM from being called on fragments too short to represent intent.
 
 ---
 
-## Step 5: starting TTS before the full reply is done
+## Part 2: Server → Client
 
-One of the best latency tricks in NeuroTalk is that it does not wait for the entire LLM answer before starting speech synthesis. It starts TTS as soon as the first sentence is complete.
+### Step 10 — LLM inference (Ollama, streaming)
 
-That logic is in [`backend/app/main.py`](../backend/app/main.py):
+The LLM call streams tokens as they are generated:
 
 ```python
-async for token in stream_llm_response(text):
+async for token in stream_llm_response(text, conversation_history=history):
+    if self._interrupt_event.is_set():
+        break
     full_response += token
-    await send_json({"type": "llm_partial", "text": strip_emotion_tags(full_response)})
-    if first_sent_task is None and not interrupt_event.is_set():
-        m = _SENT_BOUNDARY.search(full_response)
-        if m and m.end() >= 20:
-            first_sent_end = m.end()
-            snippet = full_response[:first_sent_end].strip()
-            tts_svc = get_tts_service()
-            first_sent_task = asyncio.ensure_future(tts_svc.synthesize(snippet))
+    await self._send_json({"type": "llm_partial", "text": full_response})
+    # Check for sentence boundary and enqueue for TTS
+    tail = full_response[processed_chars:]
+    m = _SENT_BOUNDARY.search(tail)  # looks for . ! ?
+    if m and m.end() >= _MIN_SENTENCE_CHARS:  # 15 chars minimum
+        sentence = clean_for_tts(tail[:m.end()].strip())
+        await sent_queue.put(sentence)
+        processed_chars += m.end()
 ```
 
-Parameter breakdown:
-
-- `_SENT_BOUNDARY`: regular expression that looks for `.`, `!`, or `?`.
-- `m.end() >= 20`: do not fire TTS for trivially short fragments.
-- `first_sent_task`: background synthesis task for the first sentence.
-
-This overlap matters because the user hears the reply sooner even though the model is still generating later text.
+Every token is immediately sent to the frontend as an `llm_partial` message so the transcript panel updates in real time. Simultaneously, the code scans for sentence boundaries. When a complete sentence is detected, it is pushed into an asyncio queue.
 
 ---
 
-## Step 6: TTS inference in this repo
+### Step 11 — Sentence-streaming TTS pipeline
 
-### The current backends
-
-The live `TTSService` in [`backend/app/services/tts.py`](../backend/app/services/tts.py) supports two code paths:
+A `_tts_sentence_pipeline` coroutine runs concurrently with the LLM loop, consuming sentences from the queue as soon as they appear:
 
 ```python
-def _load_model(self) -> Any:
-    model = self._load_kokoro() if self._backend == "kokoro" else self._load_chatterbox()
+async def _tts_sentence_pipeline(self, queue: asyncio.Queue) -> None:
+    self._is_agent_speaking = True
+    while True:
+        sentence = await queue.get()
+        if sentence is None or self._interrupt_event.is_set():
+            break
+        wav_bytes, sr = await tts_service.synthesize(sentence)
+        if self._interrupt_event.is_set():
+            break
+        wav_b64 = base64.b64encode(wav_bytes).decode()
+        await self._send_json({
+            "type": "tts_audio",
+            "data": wav_b64,
+            "sample_rate": sr,
+            "sentence_text": sentence,
+        })
+    self._is_agent_speaking = False
+    if self._interrupt_event.is_set():
+        await self._send_json({"type": "tts_interrupted"})
+    else:
+        await self._send_json({"type": "tts_done"})
 ```
 
-That means:
+This is why the agent starts speaking before the full LLM response is done. By the time the LLM finishes its second sentence, the TTS of the first sentence is already playing in the browser.
 
-- `tts_backend == "kokoro"` loads Kokoro
-- anything else currently falls through to Chatterbox
-
-The settings file lists supported backend names as `kokoro | chatterbox | qwen | vibevoice | omnivoice`, and `backend/pyproject.toml` defines dependency groups for all of them. But today, only Kokoro and Chatterbox are actually loaded in code.
-
-### Kokoro
-
-#### How Kokoro is trained
-
-The original Kokoro model card describes it as an 82M open-weight TTS model, and the MLX checkpoint used here is a conversion of that original model. The card also points to a StyleTTS2-derived lineage. At a beginner level, you can think of Kokoro as a text-to-speech model trained on aligned text-audio pairs so it learns pronunciation, prosody, and voice identity.
-
-Example:
-
-- Input text during training: `your refund will arrive in three business days`
-- Target: an audio recording of a speaker saying that sentence naturally
-
-#### How Kokoro inference works in this repo
-
-Kokoro loading:
-
-```python
-from mlx_audio.tts.utils import load_model
-model = load_model(_KOKORO_MODEL_ID)
-for _ in model.generate(_WARMUP_TEXT, voice=_KOKORO_VOICE, speed=_KOKORO_SPEED, lang_code=_KOKORO_LANG):
-    pass
-```
-
-Kokoro synthesis:
-
-```python
-for result in self._model.generate(clean, voice=_KOKORO_VOICE, speed=_KOKORO_SPEED, lang_code=_KOKORO_LANG):
-    final_audio = result.audio
-    sample_rate = getattr(result, "sample_rate", 24000)
-```
-
-Parameter breakdown:
-
-- `_KOKORO_MODEL_ID`: the MLX model checkpoint, `mlx-community/Kokoro-82M-bf16`
-- `voice`: speaker preset, default `af_heart`
-- `speed`: speaking rate, default `1.0`
-- `lang_code`: language control code, default `"a"`
-
-Then NeuroTalk converts the generated floating-point waveform to PCM16 WAV bytes:
+**TTS synthesis** (Kokoro or Chatterbox) takes a text string and returns WAV bytes at 24 kHz. Kokoro uses the `mlx-audio` MLX inference engine on Apple Silicon. The output is a `numpy` float32 waveform converted to signed 16-bit PCM:
 
 ```python
 samples = np.asarray(final_audio).squeeze()
 pcm16 = (np.clip(samples, -1.0, 1.0) * 32767).astype(np.int16)
 ```
 
-One implementation detail matters a lot: Kokoro strips emotion tags before synthesis in this repo:
-
-```python
-from app.utils.emotion import strip_emotion_tags
-clean = strip_emotion_tags(text)
-```
-
-So Kokoro is being used here as a clean text-to-audio engine, not as the expressive tag-preserving path.
-
-### Chatterbox Turbo
-
-#### How Chatterbox is trained
-
-Resemble AI describes Chatterbox Turbo as a streamlined 350M-parameter TTS model and says its speech-token-to-mel decoder was distilled from 10 steps to 1. The project also documents native support for paralinguistic tags such as `[laugh]` and `[chuckle]`, which indicates an expressive synthesis design rather than plain neutral readout only.
-
-#### How Chatterbox inference works in this repo
-
-Loading:
-
-```python
-from chatterbox.tts_turbo import ChatterboxTurboTTS
-device = (
-    "mps" if torch.backends.mps.is_available()
-    else "cuda" if torch.cuda.is_available()
-    else "cpu"
-)
-model = ChatterboxTurboTTS.from_pretrained(device=device)
-model.generate(_WARMUP_TEXT)
-```
-
-Parameter breakdown:
-
-- `device`: picks Apple Metal, CUDA, or CPU depending on the machine.
-- `from_pretrained(...)`: loads pretrained weights rather than training locally.
-- `_WARMUP_TEXT`: forces one initial generation so the model is ready before user-facing traffic.
-
-Synthesis:
-
-```python
-waveform = self._model.generate(text)
-samples = (
-    waveform.detach().cpu().squeeze().numpy()
-    if torch.is_tensor(waveform)
-    else np.asarray(waveform).squeeze()
-)
-```
-
-Unlike the Kokoro path, the Chatterbox path keeps the input text intact, including supported expressive tags. That fits the project prompt design, where the LLM is allowed to emit a small set of inline emotion markers.
+That byte array is base64-encoded and sent as the `data` field of a `tts_audio` message.
 
 ---
 
-## Optional backends declared in the repo
+### Step 12 — RTCDataChannel delivery
 
-The repo also defines dependency groups for Qwen TTS, VibeVoice, and OmniVoice in [`backend/pyproject.toml`](../backend/pyproject.toml). They are not loaded by the current `TTSService`, but they still matter because they show the intended expansion path of the project.
+`tts_audio` messages — along with all other signalling (`ready`, `partial`, `llm_start`, `llm_partial`, `llm_final`, `tts_start`, `tts_done`, `tts_interrupted`) — travel over the `RTCDataChannel` named `"signaling"`.
 
-### Qwen TTS
+The data channel was created by the browser with `ordered: true`. This means:
 
-The Qwen3-TTS technical report describes a multilingual, controllable, streaming TTS family trained on more than 5 million hours of speech data across 10 languages. The paper says the system uses a dual-track LM architecture plus specialized speech tokenizers for streaming generation.
+- Messages are delivered in the order they were sent (no out-of-order delivery)
+- The channel internally uses SCTP over DTLS-SRTP over UDP — the same encrypted UDP connection as the media path
+- Retransmission is automatic for lost messages (unlike the audio RTP stream, which tolerates loss)
 
-The beginner picture is:
-
-- training: text and control signals are paired with speech targets
-- inference: the model predicts speech tokens and a decoder reconstructs waveform audio
-
-Because this repo currently only declares `qwen-tts` as a dependency group and does not yet wire it into `TTSService`, there is no live inference snippet to show from the codebase yet.
-
-### VibeVoice
-
-Microsoft describes VibeVoice as a voice-model family using continuous speech tokenizers at 7.5 Hz plus a next-token diffusion framework. The technical report focuses on long-form multi-speaker synthesis.
-
-The beginner picture is:
-
-- training: text context, semantic planning, and acoustic supervision are learned together
-- inference: the model predicts compressed speech representations and a diffusion component produces detailed speech
-
-Again, this repo declares the dependency group but does not yet expose a VibeVoice inference path in `backend/app/services/tts.py`.
-
-### OmniVoice
-
-The OmniVoice paper describes a zero-shot multilingual TTS model for more than 600 languages. It uses a diffusion language model-style discrete non-autoregressive architecture and was trained on a 581k-hour multilingual dataset curated from open-source data.
-
-The beginner picture is:
-
-- training: text is supervised against multilingual acoustic-token targets
-- inference: text maps to acoustic tokens, then to waveform audio, with a design that aims to be faster than older multi-stage pipelines
-
-As with Qwen and VibeVoice, NeuroTalk currently declares OmniVoice as an optional backend but does not yet route inference to it.
+Because the channel is ordered, the sequence `tts_start → tts_audio(sentence1) → tts_audio(sentence2) → tts_done` always arrives in that order on the browser.
 
 ---
 
-## Step 7: interruption and turn-taking
+### Step 13 — Frontend audio queue and playback
 
-Voice agents feel broken if they cannot be interrupted. NeuroTalk treats interruption as a core interaction, not a bonus feature.
+The browser receives each `tts_audio` message, decodes it, and adds it to a queue:
 
-When the frontend decides the user is speaking over the agent, it sends `interrupt`. On the backend:
-
-```python
-if event_type == "interrupt":
-    interrupt_event.set()
-    pending_llm_call = None
-    ...
-    if llm_task is not None and not llm_task.done():
-        llm_task.cancel()
+```typescript
+// tts_audio handler
+const binary = Uint8Array.from(atob(msg.data!), c => c.charCodeAt(0));
+const audioBuffer = await audioCtxRef.current.decodeAudioData(binary.buffer);
+ttsQueueRef.current.push({ buffer: audioBuffer, text: msg.sentence_text ?? "" });
+if (!isTtsPlayingRef.current) playNextTtsChunk();
 ```
 
-And before TTS sends audio, the backend checks the same interrupt flag:
+`AudioContext.decodeAudioData` decodes the WAV (including header parsing and PCM decoding) into an `AudioBuffer` — the browser's in-memory audio representation optimised for low-latency playback.
 
-```python
-async def synthesize_and_send(...):
-    if interrupt_event.is_set():
-        return
+Playback is strictly sequential via `playNextTtsChunk`:
+
+```typescript
+const playNextTtsChunk = useCallback(() => {
+  const chunk = ttsQueueRef.current.shift();
+  if (!chunk) {
+    isTtsPlayingRef.current = false;
+    return;
+  }
+  isTtsPlayingRef.current = true;
+  const source = audioCtxRef.current.createBufferSource();
+  source.buffer = chunk.buffer;
+  source.connect(audioCtxRef.current.destination);
+  source.onended = () => {
+    revealedTextRef.current += chunk.text + " ";
+    playNextTtsChunk();  // play next sentence when this one finishes
+  };
+  source.start();
+}, []);
 ```
 
-That means interruption is implemented as a shared cancellation signal across the whole voice loop:
+Each sentence is played to completion before the next begins. The `sentence_text` field is used to reveal the transcript word-group by word-group as the agent speaks, rather than dumping the full response at once.
 
-- stop any queued LLM work
-- cancel running generation
-- suppress outgoing TTS audio
-- prepare for the next user turn
+---
 
-This is one of the main reasons the system feels like a conversation instead of a push-to-talk demo.
+## Interrupt handling: the full path
+
+Interrupt is a coordinated cancel signal that must stop the pipeline at every stage simultaneously.
+
+### Client-side detection
+
+The browser's `ScriptProcessorNode` (2048 sample buffer) runs on every audio chunk. During agent speech, it measures energy:
+
+```typescript
+const rms = Math.sqrt(samples.reduce((s, v) => s + v * v, 0) / samples.length);
+if (rms > BARGE_IN_THRESHOLD) bargeInFrameCount++;
+if (bargeInFrameCount >= BARGE_IN_FRAMES) {  // 1 frame required
+    clearTtsQueue();      // stop playback immediately
+    transport.send({ type: "interrupt" });
+}
+```
+
+`clearTtsQueue()` stops the currently playing `AudioBufferSourceNode`, clears the pending queue, and resets all playback refs. This is synchronous — the audio stops in the same JS microtask.
+
+The `interrupt` message is also sent via the data channel so the server can cancel its LLM/TTS work.
+
+### Server-side VAD (concurrent path)
+
+As described in Step 7, the server-side VAD detects barge-in on the decoded RTP frames — independently of the client message. The first path to fire wins; both call `_handle_interrupt()`, which is idempotent (sets the event and cancels tasks, but only acts if they are not already done).
+
+### Interrupt handler (server)
+
+```python
+async def _handle_interrupt(self) -> None:
+    self._interrupt_event.set()          # signals all loops to stop
+    self._is_agent_speaking = False
+    self._barge_in_count = 0
+    if self._llm_task and not self._llm_task.done():
+        self._llm_task.cancel()           # fire-and-forget — no await
+        self._llm_task = None
+```
+
+`_llm_task.cancel()` is fire-and-forget (no `await`). This is intentional: the LLM loop's `async for token in stream_llm_response(...)` will raise `CancelledError` on the next iteration, and `_tts_sentence_pipeline` checks `interrupt_event` before each synthesis call, so it exits cleanly without blocking the audio consumer.
+
+When `_tts_sentence_pipeline` exits due to the interrupt event, it sends `tts_interrupted`:
+
+```python
+if self._interrupt_event.is_set():
+    await self._send_json({"type": "tts_interrupted"})
+```
+
+The frontend handles this by clearing any remaining queue items and transitioning back to listening mode:
+
+```typescript
+case "tts_interrupted":
+    clearTtsQueue();
+    startTransition(() => setMode("listening"));
+    break;
+```
+
+After the interrupt, `_pcm_buffer` is cleared and the session is ready for the next user turn. The interrupt event itself is cleared at the start of `_run_llm` when the next LLM call begins.
+
+---
+
+## Timing: where latency comes from
+
+| Stage | Typical time | Notes |
+|-------|-------------|-------|
+| Mic → UDP delivery | ~1–5 ms | Loopback/LAN; dominated by OS audio buffer |
+| ICE + DTLS setup | ~50–200 ms | One-time per session |
+| STT (first partial) | ~300–600 ms | Depends on buffer fill time and model size |
+| Silence debounce | 350 ms | Configurable via `STREAM_LLM_SILENCE_MS` |
+| LLM first token | ~100–500 ms | Depends on model and hardware |
+| LLM first sentence boundary | ~300–1000 ms | Depends on response style and model |
+| TTS synthesis (one sentence) | ~100–400 ms | Kokoro MLX on Apple Silicon |
+| DataChannel → AudioContext | ~5–20 ms | JSON parse + WAV decode |
+| **Total (first speech heard)** | **~1.5–3 s** | From end of user utterance |
+
+The sentence-streaming pipeline overlaps TTS synthesis with LLM generation. By the time sentence 2 is ready from the LLM, sentence 1 is already playing. The user hears the reply start well before the full LLM response is complete.
 
 ---
 
 ## Why the sequence matters
 
-The main lesson from NeuroTalk is not just which models are used. It is how they are sequenced.
+The design choices are interconnected:
 
-1. STT is trained to map audio to text, and NeuroTalk runs it repeatedly on a growing buffer.
-2. The LLM is trained as a text model, and NeuroTalk feeds it stable partial transcripts instead of waiting for the full stop event.
-3. TTS is trained to map text to speech, and NeuroTalk starts it on the first sentence before the full reply is complete.
-4. The app manages interruption and timing so the boundaries between the models feel invisible to the user.
+- **WebRTC + Opus** provides compressed, low-latency audio with browser-native echo cancellation — the single most important preprocessing step for a hands-free agent
+- **RTP over UDP** lets media arrive with minimal buffering; a dropped packet is a small audio artifact, not a stall
+- **RTCDataChannel** reuses the same encrypted UDP path as the media, so signalling messages have the same low-latency properties as the audio
+- **Server-side VAD on decoded frames** fires the interrupt without a browser round-trip — critical for sub-100 ms barge-in feel
+- **Sentence-streaming TTS** means the agent starts speaking ~1 sentence of LLM time after you finish talking, not one full LLM response time
+- **asyncio + executor** keeps the event loop responsive to interrupt signals even while the synchronous STT inference is running
 
-That is the real shape of a practical voice agent: not one magical model, but multiple specialized models stitched together with careful streaming logic.
+The result is not one model doing everything — it is five stages (AEC, STT, LLM, TTS, playback) each doing one job well, stitched together with careful async orchestration so the handoffs feel invisible.
 
 ---
 
@@ -482,26 +515,34 @@ That is the real shape of a practical voice agent: not one magical model, but mu
 
 ### Repo files
 
+- [`backend/app/webrtc/session.py`](../backend/app/webrtc/session.py)
+- [`backend/app/webrtc/router.py`](../backend/app/webrtc/router.py)
 - [`backend/app/main.py`](../backend/app/main.py)
 - [`backend/app/services/stt.py`](../backend/app/services/stt.py)
 - [`backend/app/services/llm.py`](../backend/app/services/llm.py)
 - [`backend/app/services/tts.py`](../backend/app/services/tts.py)
 - [`backend/config/settings.py`](../backend/config/settings.py)
-- [`backend/app/prompts/system.py`](../backend/app/prompts/system.py)
+- [`frontend/components/webrtc-transport.ts`](../frontend/components/webrtc-transport.ts)
+- [`frontend/components/voice-agent-console.tsx`](../frontend/components/voice-agent-console.tsx)
 - [`backend/pyproject.toml`](../backend/pyproject.toml)
 
 ### External references
 
+- IETF RFC 3550, "RTP: A Transport Protocol for Real-Time Applications": https://www.rfc-editor.org/rfc/rfc3550
+- IETF RFC 3711, "The Secure Real-time Transport Protocol (SRTP)": https://www.rfc-editor.org/rfc/rfc3711
+- IETF RFC 5245, "Interactive Connectivity Establishment (ICE)": https://www.rfc-editor.org/rfc/rfc5245
+- IETF RFC 6347, "Datagram Transport Layer Security Version 1.2 (DTLS)": https://www.rfc-editor.org/rfc/rfc6347
+- Opus codec specification: https://opus-codec.org/
+- W3C WebRTC 1.0 API: https://www.w3.org/TR/webrtc/
+- W3C Media Capture and Streams: https://www.w3.org/TR/mediacapture-streams/
+- aiortc documentation: https://aiortc.readthedocs.io/
+- PyAV documentation: https://pyav.org/docs/
 - OpenAI, "Robust Speech Recognition via Large-Scale Weak Supervision" (Whisper): https://arxiv.org/abs/2212.04356
 - SYSTRAN, `faster-whisper` README: https://github.com/SYSTRAN/faster-whisper
-- OpenNMT, CTranslate2 README: https://github.com/OpenNMT/CTranslate2
 - Google, Gemma 3 model card: https://ai.google.dev/gemma/docs/core/model_card_3
-- Gemma Team, "Gemma 3 Technical Report": https://arxiv.org/abs/2503.19786
 - Ollama API docs: https://docs.ollama.com/api
 - hexgrad, Kokoro model card: https://huggingface.co/hexgrad/Kokoro-82M
 - MLX Community, Kokoro MLX model card: https://huggingface.co/mlx-community/Kokoro-82M-bf16
 - Resemble AI, Chatterbox repository: https://github.com/resemble-ai/chatterbox
 - Qwen Team, "Qwen3-TTS Technical Report": https://arxiv.org/abs/2601.15621
 - Microsoft, VibeVoice repository: https://github.com/microsoft/VibeVoice
-- Microsoft Research, "VibeVoice Technical Report": https://arxiv.org/abs/2508.19205
-- "OmniVoice: Towards Omnilingual Zero-Shot Text-to-Speech with Diffusion Language Models": https://arxiv.org/abs/2604.00688
