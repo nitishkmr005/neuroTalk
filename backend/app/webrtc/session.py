@@ -79,7 +79,6 @@ class WebRTCSession:
 
         # Conversation state
         self._conversation_history: list[dict[str, str]] = []
-        self._llm_responded = False
 
         # Barge-in state
         self._is_agent_speaking = False
@@ -540,7 +539,6 @@ class WebRTCSession:
             await self._send_json({"type": "tts_done"})
 
     async def _run_llm(self, text: str, trigger: str) -> None:
-        self._llm_responded = False
         self._interrupt_event.clear()
         self._latest_llm_input = text
 
@@ -611,7 +609,6 @@ class WebRTCSession:
                 self._vad_stream.reset()
 
         if full_response and call_error is None and not self._interrupt_event.is_set():
-            self._llm_responded = True
             self._conversation_history.append({"role": "user", "content": text})
             self._conversation_history.append({"role": "assistant", "content": full_response})
             max_msgs = self._settings.llm_max_history_turns * 2

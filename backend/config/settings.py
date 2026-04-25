@@ -21,11 +21,11 @@ class Settings(BaseSettings):
     )
 
     # ── STT — faster-whisper ──────────────────────────────────────────────────
-    # Model size: tiny | base | small | medium | large-v3
-    stt_model_size: str = "small"
+    # Model size: tiny.en | base.en | small.en | medium.en | large-v3
+    stt_model_size: str = "small.en"
     # Device: cpu | cuda | mps
     stt_device: str = "cpu"
-    # Compute type: int8 | float16 | float32 (float16/float32 require GPU)
+    # Compute type: int8 (fast CPU) | float16 (GPU) | float32 (slow CPU)
     stt_compute_type: str = "int8"
     stt_beam_size: int = 1
     stt_vad_filter: bool = True
@@ -34,9 +34,9 @@ class Settings(BaseSettings):
 
     # ── Streaming / Debounce ──────────────────────────────────────────────────
     # How often to emit a partial STT result (ms). Lower = faster LLM trigger.
-    stream_emit_interval_ms: int = 250
+    stream_emit_interval_ms: int = 1200
     # Minimum audio buffer before emitting (ms). Lower = faster, more empty results.
-    stream_min_audio_ms: int = 300
+    stream_min_audio_ms: int = 900
     # Minimum transcript length before firing the LLM (chars).
     stream_llm_min_chars: int = 8
     # Silence window before firing the LLM (ms). Lower = more responsive,
@@ -64,18 +64,12 @@ class Settings(BaseSettings):
     #   gemma3:1b  — fastest, minimal memory, lower quality
     #   gemma4:latest — high quality, large (9.6 GB)
     llm_model: str = "llama3.2:3b" #"gemma3:1b"
-    llm_max_tokens: int = 100
     # Number of user+assistant turn pairs to keep in context.
     llm_max_history_turns: int = 6
     llm_system_prompt: str = VOICE_AGENT_PROMPT
 
     # ── Storage ───────────────────────────────────────────────────────────────
     temp_dir: Path = Path(".cache/audio")
-
-    # ── Web Search ────────────────────────────────────────────────────────────
-    # Fires only when the keyword classifier matches the user query.
-    web_search_enabled: bool = False
-    web_search_max_results: int = 3
 
     @property
     def cors_origins(self) -> list[str]:
