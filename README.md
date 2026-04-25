@@ -1,8 +1,28 @@
 # NeuroTalk
 
-Real-time voice agent console with selectable `WebRTC` and `WebSocket` transports, live transcription, sentence-streamed AI replies, and interrupt handling.
+A fully local, real-time voice agent with selectable `WebRTC` and `WebSocket` transports — speak into your browser, get a spoken reply back. No cloud APIs. No API keys. Everything runs on your machine.
 
 ![NeuroTalk voice agent console](docs/images/neurotalk-console-preview.png)
+
+---
+
+## What is NeuroTalk?
+
+NeuroTalk is a conversational voice agent that runs the full speech-to-speech pipeline locally:
+
+```
+Microphone → STT (Whisper) → LLM (Ollama) → TTS (Kokoro/Chatterbox) → Speaker
+```
+
+Audio streams over a single WebSocket. The backend transcribes speech incrementally, starts the LLM call before you finish speaking, and begins synthesizing audio as soon as the first sentence is ready — so the agent starts talking in parallel with its own thinking rather than waiting for a complete response.
+
+## Key Features
+
+- **Fully local** — STT, LLM, and TTS all run on your hardware; nothing leaves your machine
+- **Low-latency streaming** — partial transcripts appear live as you speak; TTS playback starts mid-generation
+- **Interrupt support** — speak over the agent at any time to cancel and start a new turn
+- **Swappable models** — change STT size, LLM, or TTS engine with a single env var
+- **Learnable codebase** — each pipeline stage has a standalone script you can run independently
 
 ## Demo
 
@@ -10,18 +30,6 @@ https://github.com/nitishkmr005/neuroTalk/raw/main/docs/NeuroTalk_Social_Media_V
 
 In the preview above, `Response Generation: 14.16 s` reflects the time the LLM spends generating the reply token by token in real time.
 Because text streaming and voice streaming are synchronized, TTS starts speaking as tokens arrive, so playback overlaps with generation instead of waiting for the full response.
-
-Designed for two contexts: **customer-facing** (direct query answering) and **associate-facing** (live call assist with database/article lookup). A voice response layer with emotional expressiveness is on the roadmap.
-
-## Highlights
-
-- `WebRTC` is the default live transport, with `WebSocket` kept as a fallback/debug path.
-- Persistent multi-turn sessions keep conversation history in the same live voice call.
-- Sentence-streaming TTS starts playback before the full LLM response finishes.
-- Real-time barge-in stops playback when the user speaks over the assistant.
-- A spoken welcome greeting is streamed as soon as the live session is ready.
-- Dedicated streaming `Silero VAD` improves speech start/end detection, endpointing, and barge-in timing.
-
 
 ## Stack
 
