@@ -22,6 +22,7 @@ Designed for two contexts: **customer-facing** (direct query answering) and **as
 - A spoken welcome greeting is streamed as soon as the live session is ready.
 - Dedicated streaming `Silero VAD` improves speech start/end detection, endpointing, and barge-in timing.
 
+
 ## Stack
 
 | Layer | Tech |
