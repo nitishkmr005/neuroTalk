@@ -36,6 +36,8 @@ type DebugInfo = {
   chunks_received: number | null;
 };
 
+type TtsVoice = { id: string; name: string };
+
 type StreamMessage = {
   type: "ready" | "partial" | "final" | "error" | "llm_start" | "llm_partial" | "llm_final" | "llm_error" | "tts_start" | "tts_audio" | "tts_done" | "tts_interrupted";
   request_id?: string;
@@ -95,6 +97,24 @@ const websocketUrl = `${backendUrl.replace(/^http/, "ws")}/ws/transcribe`;
 const initialWaveLevels = waveformHeights.map(() => 0.18);
 const BARGE_IN_THRESHOLD = 0.15;
 const BARGE_IN_FRAMES = 1;
+const DEFAULT_TTS_VOICE = "af_heart";
+const TTS_VOICE_STORAGE_KEY = "nt-tts-voice";
+
+function formatVoiceName(voiceId: string): string {
+  const sep = voiceId.indexOf("_");
+  if (sep < 0) return voiceId;
+  const prefix = voiceId.slice(0, sep);
+  const rawName = voiceId.slice(sep + 1);
+  const accent: Record<string, string> = {
+    a: "American", b: "British", e: "Spanish", f: "French",
+    h: "Hindi", i: "Italian", j: "Japanese", p: "Portuguese", z: "Mandarin",
+  };
+  const gender: Record<string, string> = { f: "Female", m: "Male" };
+  const a = accent[prefix[0] ?? ""] ?? "";
+  const g = gender[prefix[1] ?? ""] ?? "";
+  const name = rawName.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+  return a && g ? `${name} (${a} ${g})` : name;
+}
 
 function float32ToInt16(input: Float32Array): Int16Array {
   const output = new Int16Array(input.length);
@@ -417,10 +437,6 @@ export function VoiceAgentConsole() {
         // Key differences: no socket.close() on tts_done — the session is
         // persistent; instead we reset to "listening" for the next turn.
         transport.onMessage = (payload) => {
-          const updateMsg = (id: string, patch: Partial<ChatMessage>) => {
-            setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, ...patch } : m)));
-          };
-
           if (payload.type === "ready") {
             streamReadyRef.current = true;
             const uid = crypto.randomUUID();
@@ -570,11 +586,19 @@ export function VoiceAgentConsole() {
             if (!audioContextRef.current) audioContextRef.current = audioCtx;
             ttsAudioReceivedRef.current = true;
             pendingDecodesRef.current++;
-            void audioCtx.decodeAudioData(bytes.buffer.slice(0), (buffer) => {
-              pendingDecodesRef.current--;
-              ttsQueueRef.current.push({ buffer, text: sentenceText });
-              if (!isTtsPlayingRef.current) playNextTtsChunk();
-            });
+            void audioCtx.decodeAudioData(
+              bytes.buffer.slice(0),
+              (buffer) => {
+                pendingDecodesRef.current--;
+                ttsQueueRef.current.push({ buffer, text: sentenceText });
+                if (!isTtsPlayingRef.current) playNextTtsChunk();
+              },
+              () => {
+                // Decode failed — drop the chunk but unblock the finalization counter.
+                pendingDecodesRef.current--;
+                if (!isTtsPlayingRef.current) playNextTtsChunk();
+              },
+            );
             return;
           }
 
@@ -799,7 +823,12 @@ export function VoiceAgentConsole() {
       };
 
       socket.onmessage = (event) => {
-        const payload = JSON.parse(event.data) as StreamMessage;
+        let payload: StreamMessage;
+        try {
+          payload = JSON.parse(event.data as string) as StreamMessage;
+        } catch {
+          return;
+        }
 
         if (payload.type === "ready") {
           streamReadyRef.current = true;
@@ -928,11 +957,19 @@ export function VoiceAgentConsole() {
           if (!audioContextRef.current) audioContextRef.current = audioCtx;
           ttsAudioReceivedRef.current = true;
           pendingDecodesRef.current++;
-          void audioCtx.decodeAudioData(bytes.buffer.slice(0), (buffer) => {
-            pendingDecodesRef.current--;
-            ttsQueueRef.current.push({ buffer, text: sentenceText });
-            if (!isTtsPlayingRef.current) playNextTtsChunk();
-          });
+          void audioCtx.decodeAudioData(
+            bytes.buffer.slice(0),
+            (buffer) => {
+              pendingDecodesRef.current--;
+              ttsQueueRef.current.push({ buffer, text: sentenceText });
+              if (!isTtsPlayingRef.current) playNextTtsChunk();
+            },
+            () => {
+              // Decode failed — drop the chunk but unblock the finalization counter.
+              pendingDecodesRef.current--;
+              if (!isTtsPlayingRef.current) playNextTtsChunk();
+            },
+          );
           return;
         }
 

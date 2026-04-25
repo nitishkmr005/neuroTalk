@@ -1,55 +1,258 @@
+"""LLM streaming service with multi-provider support and optional web search."""
+
+from __future__ import annotations
+
 from typing import AsyncGenerator
 
 from loguru import logger
-from ollama import AsyncClient
 
 from config.settings import get_settings
 
+
+# ── Message helpers ───────────────────────────────────────────────────────────
+
+def _build_messages(
+    transcript: str,
+    system_prompt: str,
+    conversation_history: list[dict[str, str]],
+    search_context: str,
+) -> list[dict[str, str]]:
+    """Build an OpenAI-compatible message list.
+
+    Injects web-search results as a prefixed block in the user message when
+    ``search_context`` is non-empty, keeping the system prompt unchanged.
+
+    Args:
+        transcript: Current user utterance.
+        system_prompt: LLM system prompt string.
+        conversation_history: Prior turns as ``[{"role": ..., "content": ...}]``.
+        search_context: Pre-formatted search results string, or ``""`` if none.
+
+    Returns:
+        Message list ready for any OpenAI-compatible chat API.
+    """
+    user_content = transcript
+    if search_context:
+        user_content = (
+            f"[Web Search Results]\n{search_context}\n\n"
+            f"[User Query]\n{transcript}"
+        )
+    return [
+        {"role": "system", "content": system_prompt},
+        *(conversation_history or []),
+        {"role": "user", "content": user_content},
+    ]
+
+
+async def _fetch_search_context(transcript: str) -> str:
+    """Run a web search and return results as a formatted string.
+
+    Args:
+        transcript: User utterance used as the search query.
+
+    Returns:
+        Numbered list of ``title / snippet / url`` entries, or ``""`` on failure.
+    """
+    from app.services.search import web_search
+
+    results = await web_search(transcript)
+    if not results:
+        return ""
+    lines = [
+        f"{i}. {r['title']}\n   {r['snippet']}\n   {r['url']}"
+        for i, r in enumerate(results, 1)
+    ]
+    return "\n".join(lines)
+
+
+# ── Provider-specific streamers ───────────────────────────────────────────────
+
+async def _stream_ollama(
+    messages: list[dict[str, str]], settings
+) -> AsyncGenerator[str, None]:
+    """Stream tokens from a local Ollama instance.
+
+    Args:
+        messages: OpenAI-compatible message list.
+        settings: Application settings (uses ``ollama_host`` and ``llm_model``).
+
+    Yields:
+        Token strings as they arrive from the model.
+    """
+    from ollama import AsyncClient
+
+    client = AsyncClient(host=settings.ollama_host)
+    stream = await client.chat(model=settings.llm_model, messages=messages, stream=True)
+    async for chunk in stream:
+        token: str = chunk.message.content
+        if token:
+            yield token
+
+
+async def _stream_openai(
+    messages: list[dict[str, str]], settings
+) -> AsyncGenerator[str, None]:
+    """Stream tokens from the OpenAI Chat Completions API.
+
+    Requires ``openai`` package (``uv sync --group openai_llm``) and a valid
+    ``OPENAI_API_KEY`` in the environment or ``.env``.
+
+    Args:
+        messages: OpenAI-compatible message list.
+        settings: Application settings (uses ``openai_api_key`` and ``llm_model``).
+
+    Yields:
+        Token strings as they arrive from the model.
+    """
+    from openai import AsyncOpenAI
+
+    client = AsyncOpenAI(api_key=settings.openai_api_key)
+    stream = await client.chat.completions.create(
+        model=settings.llm_model,
+        messages=messages,
+        stream=True,
+    )
+    async for chunk in stream:
+        delta = chunk.choices[0].delta.content
+        if delta:
+            yield delta
+
+
+async def _stream_anthropic(
+    messages: list[dict[str, str]], settings
+) -> AsyncGenerator[str, None]:
+    """Stream tokens from the Anthropic Messages API.
+
+    Requires ``anthropic`` package (``uv sync --group anthropic_llm``) and a
+    valid ``ANTHROPIC_API_KEY``.  The system message is extracted and passed
+    via the dedicated ``system`` parameter rather than in the messages list.
+
+    Args:
+        messages: OpenAI-compatible message list (system role handled separately).
+        settings: Application settings (uses ``anthropic_api_key`` and ``llm_model``).
+
+    Yields:
+        Token strings as they arrive from the model.
+    """
+    import anthropic
+
+    client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
+    system = next((m["content"] for m in messages if m["role"] == "system"), "")
+    non_system = [m for m in messages if m["role"] != "system"]
+    async with client.messages.stream(
+        model=settings.llm_model,
+        system=system,
+        messages=non_system,
+        max_tokens=1024,
+    ) as stream:
+        async for text in stream.text_stream:
+            yield text
+
+
+async def _stream_gemini(
+    messages: list[dict[str, str]], settings
+) -> AsyncGenerator[str, None]:
+    """Stream tokens from the Google Gemini API.
+
+    Requires ``google-generativeai`` package (``uv sync --group gemini_llm``) and
+    a valid ``GEMINI_API_KEY``.  Converts OpenAI-style messages to Gemini's
+    ``user`` / ``model`` format and passes the system prompt via
+    ``system_instruction``.
+
+    Args:
+        messages: OpenAI-compatible message list.
+        settings: Application settings (uses ``gemini_api_key`` and ``llm_model``).
+
+    Yields:
+        Token strings as they arrive from the model.
+    """
+    import google.generativeai as genai
+
+    genai.configure(api_key=settings.gemini_api_key)
+    system = next((m["content"] for m in messages if m["role"] == "system"), None)
+    # Gemini uses "user" / "model" roles; drop system (passed via system_instruction)
+    contents = [
+        {"role": "model" if m["role"] == "assistant" else "user", "parts": [m["content"]]}
+        for m in messages
+        if m["role"] != "system"
+    ]
+    model = genai.GenerativeModel(settings.llm_model, system_instruction=system)
+    response = await model.generate_content_async(contents, stream=True)
+    async for chunk in response:
+        if chunk.text:
+            yield chunk.text
+
+
+# ── Public interface ──────────────────────────────────────────────────────────
 
 async def stream_llm_response(
     transcript: str,
     conversation_history: list[dict[str, str]] | None = None,
 ) -> AsyncGenerator[str, None]:
-    """
-    Stream the LLM response token-by-token using Ollama.
+    """Stream LLM response tokens for a user utterance.
 
-    Builds the message list as: system prompt → conversation history → current user message.
+    Orchestrates the full pipeline:
+    1. Optionally runs a web search and injects results as context.
+    2. Builds the message list (system + history + user).
+    3. Dispatches to the configured provider and yields tokens.
+
+    Supported providers (set ``LLM_PROVIDER`` in ``.env``):
+    - ``ollama``    — local Ollama instance (default)
+    - ``openai``    — OpenAI API (requires ``uv sync --group openai_llm``)
+    - ``anthropic`` — Anthropic API (requires ``uv sync --group anthropic_llm``)
+    - ``gemini``    — Google Gemini API (requires ``uv sync --group gemini_llm``)
 
     Args:
-        transcript: The user's transcribed speech to send as the current user message.
-        conversation_history: Optional list of previous {"role": "user"/"assistant",
-                              "content": "..."} dicts for multi-turn context.
+        transcript: The user's transcribed speech to send as the current message.
+        conversation_history: Prior ``{"role": ..., "content": ...}`` turn pairs.
 
-    Returns:
-        An async generator that yields string tokens as they stream from the model.
+    Yields:
+        Token strings from the model as they stream.
 
-    Library:
-        ollama (AsyncClient) — streams chat completions from a local Ollama instance.
+    Raises:
+        ValueError: If ``settings.llm_provider`` is not a recognised provider.
     """
     settings = get_settings()
-    client = AsyncClient(host=settings.ollama_host)
 
-    messages: list[dict[str, str]] = [
-        {"role": "system", "content": settings.llm_system_prompt},
-        *(conversation_history or []),
-        {"role": "user", "content": transcript},
-    ]
+    search_context = ""
+    if settings.web_search_enabled:
+        search_context = await _fetch_search_context(transcript)
+        if search_context:
+            logger.info(
+                "event=web_search_injected chars={} query={!r}",
+                len(search_context),
+                transcript[:60],
+            )
+
+    messages = _build_messages(
+        transcript,
+        settings.llm_system_prompt,
+        conversation_history or [],
+        search_context,
+    )
 
     logger.info(
-        "event=llm_start model={} host={} history_turns={} input_preview={!r}",
+        "event=llm_start provider={} model={} history_turns={} input_preview={!r}",
+        settings.llm_provider,
         settings.llm_model,
-        settings.ollama_host,
         len(conversation_history or []) // 2,
         transcript[:60],
     )
 
-    stream = await client.chat(
-        model=settings.llm_model,
-        messages=messages,
-        stream=True,
-    )
-
-    async for chunk in stream:
-        token: str = chunk.message.content
-        if token:
+    if settings.llm_provider == "ollama":
+        async for token in _stream_ollama(messages, settings):
             yield token
+    elif settings.llm_provider == "openai":
+        async for token in _stream_openai(messages, settings):
+            yield token
+    elif settings.llm_provider == "anthropic":
+        async for token in _stream_anthropic(messages, settings):
+            yield token
+    elif settings.llm_provider == "gemini":
+        async for token in _stream_gemini(messages, settings):
+            yield token
+    else:
+        raise ValueError(
+            f"Unknown llm_provider {settings.llm_provider!r}. "
+            "Choose: ollama | openai | anthropic | gemini"
+        )

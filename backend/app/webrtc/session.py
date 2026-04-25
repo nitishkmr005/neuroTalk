@@ -42,19 +42,25 @@ _RTC_CONFIG = RTCConfiguration(
 
 
 class WebRTCSession:
-    """
-    One WebRTC peer-connection per browser tab.
+    """One WebRTC peer-connection per browser tab.
 
     Audio arrives as RTP (Opus → PCM via aiortc/av).
     All JSON signalling (ready / partial / llm_* / tts_*) travels over an
     ordered RTCDataChannel named "signaling" — same message schema as the
     WebSocket path so the frontend handler is reusable.
 
-    Args:
-        session_id: Short hex ID shared with the frontend as `request_id`.
+    Attributes:
+        session_id: Short hex ID shared with the frontend as ``request_id``.
+        pc: The underlying ``RTCPeerConnection``.
+        dc: The signalling ``RTCDataChannel``, set once the browser opens it.
     """
 
     def __init__(self, session_id: str) -> None:
+        """Initialise session state and register peer-connection event handlers.
+
+        Args:
+            session_id: Short hex ID used for logging and sent to the frontend.
+        """
         self.session_id = session_id
         self._settings = get_settings()
         self.pc = RTCPeerConnection(_RTC_CONFIG)
@@ -71,7 +77,7 @@ class WebRTCSession:
         self._send_lock = asyncio.Lock()
         self._llm_task: asyncio.Task | None = None
         self._tts_task: asyncio.Task | None = None
-        self._pending_llm_call: tuple[str, str] | None = None
+        self._pending_llm_call: str | None = None
         self._latest_llm_input = ""
         self._interrupt_event = asyncio.Event()
         self._silence_debounce_task: asyncio.Task | None = None
@@ -79,6 +85,7 @@ class WebRTCSession:
 
         # Conversation state
         self._conversation_history: list[dict[str, str]] = []
+        self._voice_id: str = self._settings.tts_kokoro_voice
 
         # Barge-in state
         self._is_agent_speaking = False
@@ -91,12 +98,18 @@ class WebRTCSession:
         self._audio_task: asyncio.Task | None = None
         self._closed = False
 
-
         self._register_pc_handlers()
 
     # ── Peer-connection lifecycle ────────────────────────────────────────────
 
     def _register_pc_handlers(self) -> None:
+        """Attach aiortc event handlers for track, datachannel, and state changes.
+
+        Registers closures on ``self.pc`` for:
+        - ``track``: starts the audio consumer coroutine when an audio track arrives.
+        - ``datachannel``: wires up open/message callbacks on the signalling channel.
+        - ``connectionstatechange``: triggers cleanup on failure or disconnection.
+        """
         @self.pc.on("track")
         def on_track(track: MediaStreamTrack) -> None:
             if track.kind == "audio":
@@ -124,15 +137,14 @@ class WebRTCSession:
                 await self._cleanup()
 
     async def setup(self, offer_sdp: str, offer_type: str) -> RTCSessionDescription:
-        """
-        Complete SDP offer/answer exchange.
+        """Complete the SDP offer/answer exchange.
 
         Args:
             offer_sdp: SDP string from the browser offer.
             offer_type: SDP type, typically ``"offer"``.
 
         Returns:
-            The local RTCSessionDescription answer to send back to the browser.
+            The local ``RTCSessionDescription`` answer to send back to the browser.
         """
         await self.pc.setRemoteDescription(
             RTCSessionDescription(sdp=offer_sdp, type=offer_type)
@@ -144,11 +156,22 @@ class WebRTCSession:
     # ── Data-channel open / message ──────────────────────────────────────────
 
     async def _on_dc_open(self) -> None:
+        """Send the ``ready`` signal and start the welcome message once the data channel opens."""
         logger.info("session_id={} event=dc_open", self.session_id)
         await self._send_json({"type": "ready", "request_id": self.session_id})
         asyncio.ensure_future(self._run_welcome())
 
     async def _handle_dc_message(self, raw: str) -> None:
+        """Dispatch an incoming JSON data-channel message to the appropriate handler.
+
+        Supported event types:
+        - ``start``: client has begun recording (informational log only).
+        - ``interrupt``: cancel any in-flight LLM/TTS.
+        - ``stop``: recording ended; run final STT and schedule LLM if transcript changed.
+
+        Args:
+            raw: JSON-encoded message string received from the browser.
+        """
         try:
             payload = json.loads(raw)
         except (json.JSONDecodeError, TypeError):
@@ -156,9 +179,14 @@ class WebRTCSession:
 
         event_type = payload.get("type")
 
-        if event_type == "start":
+        if event_type == "tts_voice":
+            self._voice_id = str(payload.get("voice", self._settings.tts_kokoro_voice))
+            logger.info("session_id={} event=tts_voice_changed voice={}", self.session_id, self._voice_id)
+
+        elif event_type == "start":
             # sample_rate from client is informational only — we always resample to 16 kHz
-            logger.info("session_id={} event=stream_started", self.session_id)
+            self._voice_id = payload.get("voice", self._settings.tts_kokoro_voice)
+            logger.info("session_id={} event=stream_started voice={}", self.session_id, self._voice_id)
 
         elif event_type == "interrupt":
             logger.info("session_id={} event=interrupt_received", self.session_id)
@@ -190,18 +218,26 @@ class WebRTCSession:
                 await self._send_json({"type": "final", **result})
                 final_text = str(result.get("text", "")).strip()
                 if final_text and final_text != self._latest_llm_input:
-                    self._schedule_llm(final_text, "final")
+                    self._schedule_llm(final_text)
 
     # ── RTP audio consumer ────────────────────────────────────────────────────
 
     async def _consume_audio(self, track: MediaStreamTrack) -> None:
-        """
-        Continuously drain RTP frames from the peer track.
+        """Continuously drain RTP frames from the peer track.
 
         Opus frames are decoded by aiortc and arrive as ``av.AudioFrame`` at 48 kHz.
-        We resample to 16 kHz (matching Whisper's expected rate) and accumulate into
-        ``self._pcm_buffer``.  Server-side VAD runs on every frame to detect barge-in
-        while the agent is speaking.
+        Each frame is resampled to 16 kHz mono (Whisper's expected rate) and
+        appended to ``self._pcm_buffer``.
+
+        On each frame, server-side VAD (if enabled) runs to detect speech start/end
+        events for barge-in detection.  When VAD is disabled, a simple RMS energy
+        gate is used as a fallback barge-in trigger.
+
+        After accumulating each frame, ``_maybe_emit_stt`` is called to emit a
+        partial STT result when buffer and time thresholds are met.
+
+        Args:
+            track: The incoming audio ``MediaStreamTrack`` from the peer connection.
         """
         resampler = av.AudioResampler(format="s16", layout="mono", rate=16_000)
         logger.info("session_id={} event=audio_consumer_started", self.session_id)
@@ -274,7 +310,13 @@ class WebRTCSession:
         logger.info("session_id={} event=audio_consumer_stopped", self.session_id)
 
     async def _maybe_emit_stt(self) -> None:
-        """Emit a partial STT result when buffer and time thresholds are met."""
+        """Emit a partial STT result when the buffer and time-interval thresholds are met.
+
+        Skips emission if a speech-finalization task or LLM task is already in
+        flight to avoid unnecessary transcription during active processing.
+        On new text, sends a ``partial`` message and (re)starts the silence
+        debounce timer.
+        """
         if not self._pcm_buffer:
             return
         if self._speech_finalization_task and not self._speech_finalization_task.done():
@@ -320,11 +362,13 @@ class WebRTCSession:
         self._last_emit_at = perf_counter()
 
     def _transcribe_buffer(self) -> dict:
-        """
-        Write ``self._pcm_buffer`` to a temp WAV and run faster-whisper.
+        """Write ``self._pcm_buffer`` to a temp WAV file and run faster-whisper.
+
+        Serialises the current PCM buffer to a temporary WAV, runs the STT
+        service, annotates timing fields, then deletes the temp file.
 
         Returns:
-            Dict with keys ``text``, ``timings_ms``, ``debug``.
+            Dict with keys ``text`` (str), ``timings_ms`` (dict), ``debug`` (dict).
         """
         started_at = perf_counter()
         temp_path = self._settings.temp_dir / f"{self.session_id}_rtc.wav"
@@ -357,6 +401,15 @@ class WebRTCSession:
             temp_path.unlink(missing_ok=True)
 
     def _schedule_speech_finalization(self, trigger: str) -> None:
+        """Create a speech-finalization task if one is not already running.
+
+        A no-op if ``_speech_finalization_task`` is still active, preventing
+        double-firing on rapid VAD end events.
+
+        Args:
+            trigger: Label passed through to ``_finalize_speech_turn`` for logging
+                     (e.g. ``"vad_end"`` or ``"debounced_partial"``).
+        """
         if self._speech_finalization_task and not self._speech_finalization_task.done():
             return
         self._speech_finalization_task = asyncio.create_task(
@@ -364,6 +417,15 @@ class WebRTCSession:
         )
 
     async def _finalize_speech_turn(self, trigger: str) -> None:
+        """Transcribe the completed utterance and schedule an LLM call.
+
+        Guards against finalising while the agent is speaking or while an LLM
+        is already in flight.  Cancels any pending silence-debounce before
+        transcribing to avoid a race with the debounce firing independently.
+
+        Args:
+            trigger: Source label for logging (e.g. ``"vad_end"``).
+        """
         try:
             if not self._pcm_buffer:
                 return
@@ -408,13 +470,19 @@ class WebRTCSession:
             self._last_text_sent = final_text
             await self._send_json({"type": "final", **result})
             if final_text != self._latest_llm_input:
-                self._schedule_llm(final_text, trigger)
+                self._schedule_llm(final_text)
         finally:
             self._speech_finalization_task = None
 
     # ── Interrupt ─────────────────────────────────────────────────────────────
 
     async def _handle_interrupt(self) -> None:
+        """Cancel all in-flight tasks and reset audio/barge-in state.
+
+        Sets the interrupt event so streaming coroutines exit cleanly, then
+        cancels (in order) TTS and LLM tasks to prevent stale audio being
+        sent after the interrupt.
+        """
         self._interrupt_event.set()
         self._pending_llm_call = None
         self._is_agent_speaking = False
@@ -447,16 +515,51 @@ class WebRTCSession:
     # ── LLM scheduling ───────────────────────────────────────────────────────
 
     async def _silence_debounce_then_fire(self, text: str, trigger: str) -> None:
+        """Wait for the silence window, then trigger speech finalization or an LLM call.
+
+        After the silence timeout, optionally polls the Smart Turn model for up
+        to ``stream_smart_turn_max_budget_ms`` before handing off.  Cancelled if
+        new audio or a VAD event resets the debounce timer before the sleep completes.
+
+        Args:
+            text: Transcript snapshot at the time the debounce was armed.
+            trigger: Source label forwarded to ``_schedule_speech_finalization``
+                     or used for logging (e.g. ``"debounced_partial"``).
+        """
         try:
             await asyncio.sleep(self._settings.stream_llm_silence_ms / 1000)
         except asyncio.CancelledError:
             return
+
+        if self._settings.stream_smart_turn_enabled:
+            from app.services.smart_turn import get_smart_turn_service
+            smart_turn = get_smart_turn_service()
+            if smart_turn.is_loaded:
+                deadline = perf_counter() + self._settings.stream_smart_turn_max_budget_ms / 1000
+                while perf_counter() < deadline:
+                    is_complete, _ = smart_turn.predict(bytes(self._pcm_buffer))
+                    if is_complete:
+                        break
+                    try:
+                        await asyncio.sleep(self._settings.stream_smart_turn_base_wait_ms / 1000)
+                    except asyncio.CancelledError:
+                        return
+
         if self._vad_stream is not None:
             self._schedule_speech_finalization(trigger)
             return
-        self._schedule_llm(text, trigger)
+        self._schedule_llm(text)
 
-    def _schedule_llm(self, text: str, trigger: str) -> None:
+    def _schedule_llm(self, text: str) -> None:
+        """Gate and enqueue an LLM call, cancelling any stale in-flight call.
+
+        Ignores short transcripts, duplicate inputs, and pause commands.
+        If an LLM is already running for older text, it is cancelled so the
+        newer, more complete utterance takes priority.
+
+        Args:
+            text: Transcript candidate to send to the LLM.
+        """
         normalized = text.strip()
         if len(normalized) < self._settings.stream_llm_min_chars:
             return
@@ -477,31 +580,31 @@ class WebRTCSession:
             self._llm_task.cancel()
             self._llm_task = None
 
-        self._pending_llm_call = (normalized, trigger)
+        self._pending_llm_call = normalized
         if self._llm_task is None or self._llm_task.done():
-            next_text, next_trigger = self._pending_llm_call
+            next_text = self._pending_llm_call
             self._pending_llm_call = None
-            self._llm_task = asyncio.create_task(self._run_llm(next_text, next_trigger))
+            self._llm_task = asyncio.create_task(self._run_llm(next_text))
 
     # ── LLM + TTS pipeline ───────────────────────────────────────────────────
 
     async def _tts_sentence_pipeline(self, queue: asyncio.Queue, enable_barge_in: bool = True) -> None:
-        """
-        Consume sentences from *queue* and synthesise + stream each one immediately.
+        """Consume sentences from *queue* and synthesise + stream each one immediately.
 
-        Runs concurrently with ``_run_llm`` so the agent starts speaking after the
-        first sentence boundary — not after the full LLM response completes.
+        Runs concurrently with ``_run_llm`` so the agent starts speaking after
+        the first sentence boundary — not after the full LLM response completes.
+        Sends ``tts_start`` before the first audio chunk and ``tts_done`` (or
+        ``tts_interrupted``) when the queue is exhausted or interrupted.
 
         Args:
-            queue: Unbounded asyncio queue carrying ``str`` sentences or a ``None``
-                   sentinel that signals end-of-stream.
-            enable_barge_in: When ``False``, server-side VAD is not activated — used
-                             for the welcome message to prevent ambient noise from
-                             cancelling synthesis before the user has spoken.
+            queue: Asyncio queue of plain-text sentences terminated by a ``None``
+                   sentinel signalling end-of-stream.
+            enable_barge_in: When ``False``, ``_is_agent_speaking`` is not set —
+                             used for the welcome message to prevent ambient noise
+                             from triggering an interrupt before the user speaks.
         """
         tts_service = get_tts_service()
         tts_started = False
-        tts_t0 = perf_counter()
         if enable_barge_in:
             self._is_agent_speaking = True
 
@@ -510,7 +613,7 @@ class WebRTCSession:
             if sentence is None or self._interrupt_event.is_set():
                 break
             try:
-                wav_bytes, sr = await tts_service.synthesize(sentence)
+                wav_bytes, sr = await tts_service.synthesize(sentence, voice=self._voice_id)
             except Exception as err:
                 logger.warning(
                     "session_id={} event=tts_error error={}", self.session_id, err
@@ -538,7 +641,17 @@ class WebRTCSession:
         else:
             await self._send_json({"type": "tts_done"})
 
-    async def _run_llm(self, text: str, trigger: str) -> None:
+    async def _run_llm(self, text: str) -> None:
+        """Run one full LLM inference turn and stream TTS audio sentence-by-sentence.
+
+        Clears the interrupt flag, streams tokens from the LLM, extracts sentence
+        boundaries to feed a concurrent TTS pipeline, and appends the completed
+        turn to conversation history on success.  Queues the next pending LLM
+        call (if any) once this one finishes.
+
+        Args:
+            text: User transcript to send as the current user message.
+        """
         self._interrupt_event.clear()
         self._latest_llm_input = text
 
@@ -562,7 +675,7 @@ class WebRTCSession:
                 await self._send_json(
                     {"type": "llm_partial", "text": strip_emotion_tags(full_response)}
                 )
-                # Extract complete sentences and enqueue for immediate TTS
+                # Extract complete sentences and enqueue for immediate TTS.
                 tail = full_response[processed_chars:]
                 while True:
                     m = _SENT_BOUNDARY.search(tail)
@@ -598,8 +711,8 @@ class WebRTCSession:
             await tts_task
         self._tts_task = None
 
-        # Clear audio buffer after the full turn (LLM + TTS) completes so any speech
-        # the user started during the agent's response isn't fed into the next query.
+        # Clear audio buffer after the full turn so any speech the user started
+        # during the agent's response isn't fed into the next query.
         if not self._interrupt_event.is_set():
             self._pcm_buffer.clear()
             self._last_text_sent = ""
@@ -616,26 +729,30 @@ class WebRTCSession:
                 self._conversation_history[:] = self._conversation_history[-max_msgs:]
 
         if self._pending_llm_call:
-            next_text, next_trigger = self._pending_llm_call
+            next_text = self._pending_llm_call
             self._pending_llm_call = None
             if next_text != self._latest_llm_input:
-                self._llm_task = asyncio.create_task(
-                    self._run_llm(next_text, next_trigger)
-                )
+                self._llm_task = asyncio.create_task(self._run_llm(next_text))
                 return
         self._llm_task = None
 
     # ── Welcome message ──────────────────────────────────────────────────────
 
     async def _run_welcome(self) -> None:
+        """Synthesise and stream the configured welcome message at session open.
+
+        Splits ``settings.welcome_message`` on sentence boundaries so the
+        frontend receives individual ``tts_audio`` events with ``sentence_text``,
+        matching the format produced by the regular LLM pipeline.  Skipped if
+        the welcome message is empty.  Barge-in is disabled so ambient noise
+        does not cancel the greeting before the user speaks.
+        """
         welcome = self._settings.welcome_message
         if not welcome:
             return
         await self._send_json({"type": "llm_start", "user_text": ""})
         await self._send_json({"type": "llm_final", "text": welcome, "llm_ms": 0})
 
-        # Split on sentence-ending punctuation so each sentence gets its own tts_audio
-        # message with sentence_text — matching the regular pipeline's synced text reveal.
         sent_queue: asyncio.Queue[str | None] = asyncio.Queue()
         for raw in re.split(r"(?<=[.!?])\s+", welcome.strip()):
             sentence = clean_for_tts(raw.strip())
@@ -648,11 +765,13 @@ class WebRTCSession:
     # ── Helpers ──────────────────────────────────────────────────────────────
 
     async def _send_json(self, payload: dict) -> None:
-        """
-        Send a JSON message via the data channel.
+        """Send a JSON message via the RTCDataChannel under a mutex.
+
+        Silently drops the message if the channel is not open, preventing
+        exceptions when the peer disconnects mid-stream.
 
         Args:
-            payload: Dict to serialise and send.
+            payload: Dict to serialise and transmit over the data channel.
         """
         async with self._send_lock:
             if self.dc and self.dc.readyState == "open":
@@ -664,6 +783,12 @@ class WebRTCSession:
                     )
 
     async def _cleanup(self) -> None:
+        """Cancel all background tasks and mark the session as closed.
+
+        Idempotent — subsequent calls after the first are no-ops.
+        Called automatically when the peer connection transitions to a terminal
+        state (``"failed"``, ``"closed"``, or ``"disconnected"``).
+        """
         if self._closed:
             return
         self._closed = True

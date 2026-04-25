@@ -53,53 +53,55 @@ class Settings(BaseSettings):
     # Backend: kokoro | chatterbox | qwen | vibevoice | omnivoice
     # Must match the installed uv dependency group (e.g. uv sync --group kokoro_model).
     tts_backend: str = "kokoro"
+    # Kokoro voice name. Run GET /tts/voices to list all available voices.
+    tts_kokoro_voice: str = "af_heart"
+    tts_kokoro_speed: float = 1.0
     # Spoken greeting on session start. Set to "" to disable.
     welcome_message: str = "Hello! I'm your Neurotalk voice assistant. How can I assist you today?"
 
-    # ── LLM — Ollama ─────────────────────────────────────────────────────────
+    # ── LLM ───────────────────────────────────────────────────────────────────
+    # Provider: ollama | openai | anthropic | gemini
+    llm_provider: str = "ollama"
     ollama_host: str = "http://localhost:11434"
-    # Recommended models (ollama pull <model>):
+    # Recommended Ollama models (ollama pull <model>):
     #   qwen3:4b   — fast, strong tool-calling, low memory  (recommended)
     #   qwen3:8b   — higher quality, ~2x slower
     #   gemma3:1b  — fastest, minimal memory, lower quality
-    #   gemma4:latest — high quality, large (9.6 GB)
-    llm_model: str = "llama3.2:3b" #"gemma3:1b"
+    llm_model: str = "llama3.2:3b"
+    # API keys — read from .env; only needed for the selected provider.
+    openai_api_key: str = ""
+    anthropic_api_key: str = ""
+    gemini_api_key: str = ""
     # Number of user+assistant turn pairs to keep in context.
     llm_max_history_turns: int = 6
     llm_system_prompt: str = VOICE_AGENT_PROMPT
+
+    # ── Web Search ────────────────────────────────────────────────────────────
+    # Requires: uv sync --group search
+    web_search_enabled: bool = False
+    web_search_max_results: int = 3
+    web_search_timeout_s: float = 5.0
+
+    # ── Smart Turn Detection ──────────────────────────────────────────────────
+    # Requires: uv sync --group smart_turn  and  models/smart-turn-v3.2-cpu.onnx
+    # See scripts/download_smart_turn_model.py to fetch the model file.
+    # Falls back to silence-only debounce when disabled or model is absent.
+    stream_smart_turn_enabled: bool = False
+    stream_smart_turn_threshold: float = 0.5
+    stream_smart_turn_model_path: str = "models/smart-turn-v3.2-cpu.onnx"
+    # Polling interval while waiting for the model to confirm turn completion (ms).
+    stream_smart_turn_base_wait_ms: int = 200
+    # Maximum extra time to wait beyond the silence timeout (ms).
+    stream_smart_turn_max_budget_ms: int = 1000
 
     # ── Storage ───────────────────────────────────────────────────────────────
     temp_dir: Path = Path(".cache/audio")
 
     @property
     def cors_origins(self) -> list[str]:
-        """
-        Parse the comma-separated CORS_ORIGINS env var into a list of origin strings.
-
-        Args:
-            None
-
-        Returns:
-            List of stripped origin URL strings.
-
-        Library:
-            pydantic-settings (BaseSettings) — value sourced from .env or environment.
-        """
         return [item.strip() for item in self.cors_origins_raw.split(",") if item.strip()]
 
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
-    """
-    Return the global Settings singleton, loaded once from .env.
-
-    Args:
-        None
-
-    Returns:
-        Cached Settings instance.
-
-    Library:
-        functools.lru_cache, pydantic-settings (BaseSettings).
-    """
     return Settings()

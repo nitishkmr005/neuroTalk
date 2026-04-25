@@ -59,6 +59,22 @@ omnivoice_model = [
   "torchaudio==2.6.0; python_version < '3.14'",
   "torchaudio>=2.9.0; python_version >= '3.14'",
 ]
+search = [
+  "duckduckgo-search>=6.0.0",
+]
+smart_turn = [
+  "onnxruntime>=1.18.0",
+  "transformers>=4.40.0",
+]
+openai_llm = [
+  "openai>=1.0.0",
+]
+anthropic_llm = [
+  "anthropic>=0.34.0",
+]
+gemini_llm = [
+  "google-generativeai>=0.8.0",
+]
 dev = [
   "pytest>=8.0.0",
   "pytest-asyncio>=0.23.0",
@@ -79,6 +95,7 @@ conflicts = [
   [{ group = "qwen_model" }, { group = "vibevoice_model" }],
   [{ group = "qwen_model" }, { group = "omnivoice_model" }],
   [{ group = "vibevoice_model" }, { group = "omnivoice_model" }],
+  [{ group = "gemini_llm" }, { group = "kokoro_model" }],
 ]
 
 [tool.uv.sources]
