@@ -3,9 +3,8 @@ from functools import lru_cache
 from time import perf_counter
 
 import numpy as np
-from loguru import logger
-from silero_vad import load_silero_vad
 import torch
+from loguru import logger
 
 from config.settings import Settings, get_settings
 
@@ -132,7 +131,10 @@ class VoiceActivityService:
             self._settings.stream_vad_min_silence_ms,
         )
         started_at = perf_counter()
-        self._model = load_silero_vad()
+        self._model = torch.jit.load(
+            str(self._settings.vad_model_path), map_location=torch.device("cpu")
+        )
+        self._model.eval()
         logger.info(
             "event=vad_model_load_finished model=silero-vad load_ms={}",
             round((perf_counter() - started_at) * 1000, 2),

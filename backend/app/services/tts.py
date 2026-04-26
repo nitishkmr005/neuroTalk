@@ -14,12 +14,7 @@ from config.settings import get_settings
 
 _WARMUP_TEXT = "Hello."
 
-_KOKORO_MODEL_ID = "mlx-community/Kokoro-82M-bf16"
 _KOKORO_LANG = "a"
-_KOKORO_VOICES = [
-    "af_heart", "af_bella", "af_nicole", "af_sarah", "af_sky",
-    "am_adam", "am_michael", "bf_emma", "bf_isabella", "bm_george", "bm_lewis",
-]
 _ESPEAK_CANDIDATES = [
     "/opt/homebrew/share/espeak-ng-data",
     "/usr/local/share/espeak-ng-data",
@@ -39,6 +34,13 @@ class TTSService:
         logger.info("event=tts_ready backend={}", self._backend)
         return model
 
+    def _resolve_voice(self, voice: str) -> str:
+        # Allowlist: only bare filenames (no path separators or dots beyond the stem).
+        if "/" in voice or "\\" in voice or ".." in voice:
+            voice = get_settings().tts_kokoro_voice
+        voice_path = get_settings().tts_kokoro_model_dir / "voices" / f"{voice}.safetensors"
+        return str(voice_path) if voice_path.exists() else voice
+
     def _load_kokoro(self) -> Any:
         if "ESPEAK_DATA_PATH" not in os.environ:
             for candidate in _ESPEAK_CANDIDATES:
@@ -47,10 +49,10 @@ class TTSService:
                     break
         settings = get_settings()
         from mlx_audio.tts.utils import load_model
-        model = load_model(_KOKORO_MODEL_ID)
+        model = load_model(settings.tts_kokoro_model_dir)
         for _ in model.generate(
             _WARMUP_TEXT,
-            voice=settings.tts_kokoro_voice,
+            voice=self._resolve_voice(settings.tts_kokoro_voice),
             speed=settings.tts_kokoro_speed,
             lang_code=_KOKORO_LANG,
         ):
@@ -76,7 +78,7 @@ class TTSService:
         settings = get_settings()
         from app.utils.emotion import strip_emotion_tags
         clean = strip_emotion_tags(text)
-        v = voice or settings.tts_kokoro_voice
+        v = self._resolve_voice(voice or settings.tts_kokoro_voice)
         s = speed if speed is not None else settings.tts_kokoro_speed
         final_audio = None
         sample_rate = 24000
@@ -133,9 +135,5 @@ def get_tts_service() -> TTSService:
 
 
 def get_available_voices() -> list[str]:
-    """Return the list of built-in Kokoro voice IDs.
-
-    Returns:
-        List of voice name strings usable with the Kokoro TTS backend.
-    """
-    return list(_KOKORO_VOICES)
+    voices_dir = get_settings().tts_kokoro_model_dir / "voices"
+    return sorted(p.stem for p in voices_dir.glob("*.safetensors"))

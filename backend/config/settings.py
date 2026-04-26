@@ -151,9 +151,25 @@ class Settings(BaseSettings):
     # ─────────────────────────────────────────────────────────────────────────
     stream_smart_turn_enabled: bool = False
     stream_smart_turn_threshold: float = 0.5
-    stream_smart_turn_model_path: str = "models/smart-turn-v3.2-cpu.onnx"
+    stream_smart_turn_model_path: str = "models/smart_turn/smart-turn-v3.2-cpu.onnx"
     stream_smart_turn_base_wait_ms: int = 200
     stream_smart_turn_max_budget_ms: int = 1000
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # MODEL DIRECTORIES — all models loaded from local disk; never downloaded
+    #
+    # stt_model_dir                  CTranslate2 Whisper model (config.json +
+    #                                model.bin). Passed directly to WhisperModel.
+    # vad_model_path                 Silero VAD TorchScript model (.jit).
+    # tts_kokoro_model_dir           Kokoro MLX model dir (config.json +
+    #                                kokoro-v1_0.safetensors + voices/).
+    # stream_smart_turn_extractor_dir  Whisper feature extractor weights for
+    #                                  Smart Turn (only loaded when enabled).
+    # ─────────────────────────────────────────────────────────────────────────
+    stt_model_dir: Path = Path("models/stt")
+    vad_model_path: Path = Path("models/vad/silero_vad.jit")
+    tts_kokoro_model_dir: Path = Path("models/kokoro")
+    stream_smart_turn_extractor_dir: Path = Path("models/smart_turn/whisper-base")
 
     # ─────────────────────────────────────────────────────────────────────────
     # STORAGE — local filesystem paths

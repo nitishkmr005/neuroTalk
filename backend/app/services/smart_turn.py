@@ -74,7 +74,9 @@ class SmartTurnService:
             opts = rt.SessionOptions()
             opts.log_severity_level = 3  # suppress ONNX Runtime info logs
             self._session = rt.InferenceSession(str(model_path), sess_options=opts)
-            self._extractor = WhisperFeatureExtractor.from_pretrained("openai/whisper-base")
+            self._extractor = WhisperFeatureExtractor.from_pretrained(
+                str(settings.stream_smart_turn_extractor_dir)
+            )
             self._loaded = True
             logger.info("event=smart_turn_loaded path={}", model_path)
         except ImportError as err:

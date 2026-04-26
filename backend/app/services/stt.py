@@ -34,7 +34,7 @@ class SpeechToTextService:
         )
         started_at = perf_counter()
         self._model = WhisperModel(
-            self.settings.stt_model_size,
+            str(self.settings.stt_model_dir),
             device=self.settings.stt_device,
             compute_type=self.settings.stt_compute_type,
         )

@@ -12,7 +12,7 @@ from pathlib import Path
 _MODEL_URL = (
     "https://github.com/nitishkmr005/LucidAI/raw/main/backend/models/smart-turn-v3.2-cpu.onnx"
 )
-_DEST = Path("models/smart-turn-v3.2-cpu.onnx")
+_DEST = Path("models/smart_turn/smart-turn-v3.2-cpu.onnx")
 
 
 def main() -> None:
@@ -28,7 +28,7 @@ def main() -> None:
     except Exception as err:
         print(f"Download failed: {err}", file=sys.stderr)
         print(
-            "Please download the model manually and place it at backend/models/smart-turn-v3.2-cpu.onnx",
+            "Please download the model manually and place it at backend/models/smart_turn/smart-turn-v3.2-cpu.onnx",
             file=sys.stderr,
         )
         sys.exit(1)
