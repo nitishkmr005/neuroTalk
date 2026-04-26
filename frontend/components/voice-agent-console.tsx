@@ -862,7 +862,7 @@ export function VoiceAgentConsole() {
           // No binary send here — audio travels via the RTP track.
         };
 
-        transport.send({ type: "start", sample_rate: rtcAudioCtx.sampleRate });
+        transport.send({ type: "start", sample_rate: rtcAudioCtx.sampleRate, voice: selectedTtsVoice, speed: ttsSpeed });
         setIsConnecting(false);
         startTransition(() => { setMode("listening"); });
         return;

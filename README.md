@@ -78,9 +78,8 @@ NeuroTalk supports two transport modes selectable in the UI:
 | **WebRTC** (default) | Browser mic → Opus RTP → UDP → aiortc → PCM 16kHz | RTCDataChannel (JSON) |
 | **WebSocket** | Browser mic → Float32 PCM → WebSocket binary frames | Same WebSocket (JSON) |
 
-WebRTC is recommended: browser-native echo cancellation, noise suppression, and auto-gain control are applied before encoding. The data channel carries the same JSON protocol as the WebSocket path, so the frontend message handler is shared between both modes.
-
-The frontend exposes a transport toggle, and the WebRTC path keeps a long-lived peer connection open so follow-up turns reuse the same session instead of reconnecting every request.
+**WebRTC** (default) sends Opus-compressed audio over UDP with browser-native echo cancellation, noise suppression, and auto-gain — use this unless UDP is blocked by a firewall.
+**WebSocket** sends raw PCM over TCP with no echo cancellation and higher bandwidth; switch to it if WebRTC fails to connect.
 
 ## Environment Variables
 
