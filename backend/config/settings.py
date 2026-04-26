@@ -163,12 +163,15 @@ class Settings(BaseSettings):
     # vad_model_path                 Silero VAD TorchScript model (.jit).
     # tts_kokoro_model_dir           Kokoro MLX model dir (config.json +
     #                                kokoro-v1_0.safetensors + voices/).
+    # tts_chatterbox_model_dir       Local Chatterbox model cache dir. If present,
+    #                                loaded offline; otherwise downloads from HF.
     # stream_smart_turn_extractor_dir  Whisper feature extractor weights for
     #                                  Smart Turn (only loaded when enabled).
     # ─────────────────────────────────────────────────────────────────────────
     stt_model_dir: Path = Path("models/stt")
     vad_model_path: Path = Path("models/vad/silero_vad.jit")
     tts_kokoro_model_dir: Path = Path("models/kokoro")
+    tts_chatterbox_model_dir: Path = Path("models/chatterbox")
     stream_smart_turn_extractor_dir: Path = Path("models/smart_turn/whisper-base")
 
     # ─────────────────────────────────────────────────────────────────────────

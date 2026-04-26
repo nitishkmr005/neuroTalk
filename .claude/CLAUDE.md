@@ -175,5 +175,6 @@ check:      ## Health check
 - Write code so future agents (or engineers) can understand and modify it safely.
 - New features must fit existing modular structure — no shortcuts or duplication.
 - `scripts/` must contain educational scripts for each core module used in the codebase.
+- NEVER DELETE MODEL FILES 
 
 ---

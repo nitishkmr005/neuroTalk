@@ -67,7 +67,11 @@ class TTSService:
             else "cuda" if torch.cuda.is_available()
             else "cpu"
         )
-        model = ChatterboxTurboTTS.from_pretrained(device=device)
+        local_dir = get_settings().tts_chatterbox_model_dir
+        if local_dir.exists():
+            model = ChatterboxTurboTTS.from_pretrained(str(local_dir), device=device)
+        else:
+            model = ChatterboxTurboTTS.from_pretrained(device=device)
         model.generate(_WARMUP_TEXT)
         return model
 
