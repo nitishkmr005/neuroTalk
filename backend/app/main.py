@@ -77,10 +77,22 @@ async def _warmup_models() -> None:
         logger.warning("event=tts_warmup_failed error={}", err)
 
 
+def _loop_exception_handler(loop: asyncio.AbstractEventLoop, context: dict) -> None:
+    # aioice schedules STUN retry timers via loop.call_later(). When the UDP
+    # transport is torn down first (sock=None, loop=None), the timer fires into
+    # a dead socket. aioice 0.10.x does not cancel these handles in
+    # connection_lost(), so the crash is unavoidable at the library level.
+    # The session is already closed when this fires — suppress the noise.
+    if "Transaction.__retry" in context.get("message", ""):
+        return
+    loop.default_exception_handler(context)
+
+
 @app.on_event("startup")
 async def startup_event() -> None:
     """FastAPI startup hook: create temp directory and kick off model warmup."""
     settings.temp_dir.mkdir(parents=True, exist_ok=True)
+    asyncio.get_event_loop().set_exception_handler(_loop_exception_handler)
     logger.info(
         "event=startup app_name={} host={} port={} temp_dir={} cors_origins={}",
         settings.app_name,
