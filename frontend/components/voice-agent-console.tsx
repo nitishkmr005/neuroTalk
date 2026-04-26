@@ -823,6 +823,9 @@ export function VoiceAgentConsole() {
         // Audio is NOT sent as binary — it travels via the RTP track added in connect().
         const rtcAudioCtx = new AudioContext();
         audioContextRef.current = rtcAudioCtx;
+        // ICE gathering + DC handshake can take several seconds, exhausting the
+        // browser's user-gesture window. Resume explicitly so onaudioprocess fires.
+        if (rtcAudioCtx.state === "suspended") await rtcAudioCtx.resume();
         const rtcSource = rtcAudioCtx.createMediaStreamSource(stream);
         const rtcProcessor = rtcAudioCtx.createScriptProcessor(2048, 1, 1);
         const rtcGain = rtcAudioCtx.createGain();

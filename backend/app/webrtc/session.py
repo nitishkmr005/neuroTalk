@@ -36,9 +36,11 @@ _MIN_SENTENCE_CHARS = 15
 _BARGE_IN_THRESHOLD = 0.15
 _BARGE_IN_FRAMES = 3
 
-_RTC_CONFIG = RTCConfiguration(
-    iceServers=[RTCIceServer(urls=["stun:stun.l.google.com:19302"])]
-)
+# No STUN server on the server side: aiortc's setLocalDescription blocks until
+# ICE gathering completes, and STUN lookups to stun.l.google.com can stall
+# 5+ seconds on restricted networks. For localhost/LAN use, host candidates
+# (local IPs) are all that's needed. Add STUN/TURN here for remote deployments.
+_RTC_CONFIG = RTCConfiguration(iceServers=[])
 
 
 class WebRTCSession:
