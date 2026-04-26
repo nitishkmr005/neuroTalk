@@ -45,5 +45,8 @@ tsconfig.tsbuildinfo
 *.venvs/
 docs/demo-narration.md
 AGENTS.md
+# Model files — large binaries, downloaded separately; never commit
+backend/models/
+
 # uv
 # (uv.lock is intentionally tracked)
