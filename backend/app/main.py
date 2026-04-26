@@ -8,6 +8,19 @@ from pathlib import Path
 from time import perf_counter
 from uuid import uuid4
 
+# aioice deliberately excludes 127.0.0.1 from host candidates (RFC purist).
+# That breaks browser↔server ICE on the same machine: the browser sends
+# connectivity checks to 127.0.0.1 but the server has no matching candidate.
+# Patch the function so loopback is included for localhost development.
+import aioice.ice as _aioice_ice
+_orig_get_host_addresses = _aioice_ice.get_host_addresses
+def _get_host_addresses_with_loopback(use_ipv4: bool, use_ipv6: bool) -> list[str]:
+    addresses = _orig_get_host_addresses(use_ipv4, use_ipv6)
+    if use_ipv4 and "127.0.0.1" not in addresses:
+        addresses.insert(0, "127.0.0.1")
+    return addresses
+_aioice_ice.get_host_addresses = _get_host_addresses_with_loopback
+
 from fastapi import FastAPI, File, HTTPException, Response, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
