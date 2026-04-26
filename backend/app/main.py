@@ -111,20 +111,15 @@ async def list_tts_voices() -> dict:
 class _TTSPreviewRequest(BaseModel):
     text: str = "Hello, this is a voice preview."
     voice: str | None = None
+    speed: float | None = None
 
 
 @app.post("/tts/preview")
 async def preview_tts(body: _TTSPreviewRequest) -> Response:
-    """Synthesise a short text sample and return the WAV audio.
-
-    Args:
-        body: JSON body with optional ``text`` and ``voice`` fields.
-
-    Returns:
-        WAV audio file as ``audio/wav`` response.
-    """
+    """Synthesise a short text sample and return the WAV audio."""
     voice = body.voice or settings.tts_kokoro_voice
-    wav_bytes, _ = await get_tts_service().synthesize(body.text, voice=voice)
+    speed = body.speed if body.speed is not None else settings.tts_kokoro_speed
+    wav_bytes, _ = await get_tts_service().synthesize(body.text, voice=voice, speed=speed)
     return Response(content=wav_bytes, media_type="audio/wav")
 
 
@@ -307,6 +302,7 @@ async def transcribe_stream(websocket: WebSocket) -> None:
 
     sample_rate: int | None = None
     voice_id: str = settings.tts_kokoro_voice
+    tts_speed: float = settings.tts_kokoro_speed
     pcm_buffer = bytearray()
     chunk_count = 0
     last_emit_at = 0.0
@@ -370,7 +366,7 @@ async def transcribe_stream(websocket: WebSocket) -> None:
             if sentence is None or interrupt_event.is_set():
                 break
             try:
-                wav_bytes, sr = await tts_service.synthesize(sentence, voice=voice_id)
+                wav_bytes, sr = await tts_service.synthesize(sentence, voice=voice_id, speed=tts_speed)
             except Exception as tts_err:
                 logger.warning("request_id={} event=tts_error error={}", request_id, tts_err)
                 continue
@@ -621,6 +617,15 @@ async def transcribe_stream(websocket: WebSocket) -> None:
                 if event_type == "tts_voice":
                     voice_id = str(payload.get("voice", settings.tts_kokoro_voice))
                     logger.info("request_id={} event=tts_voice_changed voice={}", request_id, voice_id)
+                    continue
+
+                if event_type == "tts_speed":
+                    try:
+                        tts_speed = float(payload.get("speed", settings.tts_kokoro_speed))
+                        tts_speed = max(0.5, min(2.0, tts_speed))
+                    except (TypeError, ValueError):
+                        pass
+                    logger.info("request_id={} event=tts_speed_changed speed={}", request_id, tts_speed)
                     continue
 
                 if event_type == "start":

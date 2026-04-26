@@ -98,7 +98,10 @@ const initialWaveLevels = waveformHeights.map(() => 0.18);
 const BARGE_IN_THRESHOLD = 0.15;
 const BARGE_IN_FRAMES = 1;
 const DEFAULT_TTS_VOICE = "af_heart";
+const DEFAULT_TTS_SPEED = 1.0;
+const SPEED_PRESETS = [0.8, 1.0, 1.15, 1.3] as const;
 const TTS_VOICE_STORAGE_KEY = "nt-tts-voice";
+const TTS_SPEED_STORAGE_KEY = "nt-tts-speed";
 
 function formatVoiceName(voiceId: string): string {
   const sep = voiceId.indexOf("_");
@@ -203,6 +206,126 @@ export function VoiceAgentConsole() {
   const amplitudeRef = useRef(0.08);
   const waveLevelsRef = useRef(initialWaveLevels);
   const startAttemptRef = useRef(0);
+
+  // ── Voice / speed settings state ─────────────────────────────────────────
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [ttsVoices, setTtsVoices] = useState<TtsVoice[]>([]);
+  const [selectedTtsVoice, setSelectedTtsVoice] = useState<string>(DEFAULT_TTS_VOICE);
+  const [ttsSpeed, setTtsSpeed] = useState<number>(DEFAULT_TTS_SPEED);
+  const [previewingVoice, setPreviewingVoice] = useState<string | null>(null);
+  const previewAudioRef = useRef<HTMLAudioElement | null>(null);
+  const previewAudioUrlRef = useRef<string | null>(null);
+
+  const stopVoicePreview = useCallback(() => {
+    if (previewAudioRef.current) {
+      previewAudioRef.current.pause();
+      previewAudioRef.current.onended = null;
+      previewAudioRef.current.onerror = null;
+      previewAudioRef.current = null;
+    }
+    if (previewAudioUrlRef.current) {
+      URL.revokeObjectURL(previewAudioUrlRef.current);
+      previewAudioUrlRef.current = null;
+    }
+    setPreviewingVoice(null);
+  }, []);
+
+  // Fetch voice list on mount + restore persisted settings
+  useEffect(() => {
+    const savedVoice = localStorage.getItem(TTS_VOICE_STORAGE_KEY);
+    if (savedVoice) setSelectedTtsVoice(savedVoice);
+    const savedSpeed = parseFloat(localStorage.getItem(TTS_SPEED_STORAGE_KEY) ?? "");
+    if (!isNaN(savedSpeed)) setTtsSpeed(savedSpeed);
+
+    let cancelled = false;
+    void fetch(`${backendUrl}/tts/voices`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((payload: { voices?: string[]; default_voice?: string } | null) => {
+        if (cancelled || !payload?.voices?.length) return;
+        const voices: TtsVoice[] = payload.voices.map((id) => ({ id, name: formatVoiceName(id) }));
+        setTtsVoices(voices);
+        setSelectedTtsVoice((cur) => {
+          const valid = voices.some((v) => v.id === cur);
+          return valid ? cur : (payload.default_voice ?? DEFAULT_TTS_VOICE);
+        });
+      })
+      .catch(() => undefined);
+    return () => { cancelled = true; };
+  }, []);
+
+  // Persist selections
+  useEffect(() => { localStorage.setItem(TTS_VOICE_STORAGE_KEY, selectedTtsVoice); }, [selectedTtsVoice]);
+  useEffect(() => { localStorage.setItem(TTS_SPEED_STORAGE_KEY, String(ttsSpeed)); }, [ttsSpeed]);
+
+  // Close settings on Escape
+  useEffect(() => {
+    if (!isSettingsOpen) return;
+    const handler = (e: KeyboardEvent) => { if (e.key === "Escape") setIsSettingsOpen(false); };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [isSettingsOpen]);
+
+  const sendToBackend = useCallback((msg: object) => {
+    const rtc = webrtcRef.current;
+    if (rtc?.isOpen) { rtc.send(msg); return; }
+    const ws = websocketRef.current;
+    if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
+  }, []);
+
+  // Sync voice/speed to backend whenever they change (only when connected)
+  useEffect(() => {
+    if (streamReadyRef.current) sendToBackend({ type: "tts_voice", voice: selectedTtsVoice });
+  }, [selectedTtsVoice, sendToBackend]);
+
+  useEffect(() => {
+    if (streamReadyRef.current) sendToBackend({ type: "tts_speed", speed: ttsSpeed });
+  }, [ttsSpeed, sendToBackend]);
+
+  const previewVoice = useCallback(async (voiceId: string, speed?: number) => {
+    if (isRecordingRef.current || mode === "speaking") return;
+    stopVoicePreview();
+    setPreviewingVoice(voiceId);
+    try {
+      const resp = await fetch(`${backendUrl}/tts/preview`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ voice: voiceId, speed: speed ?? ttsSpeed }),
+      });
+      if (!resp.ok) throw new Error("Preview failed");
+      const blob = await resp.blob();
+      const url = URL.createObjectURL(blob);
+      const audio = new Audio(url);
+      previewAudioUrlRef.current = url;
+      previewAudioRef.current = audio;
+      audio.onended = () => { if (previewAudioRef.current === audio) stopVoicePreview(); };
+      audio.onerror = () => { if (previewAudioRef.current === audio) stopVoicePreview(); };
+      await audio.play();
+    } catch {
+      stopVoicePreview();
+    }
+  }, [mode, stopVoicePreview]);
+
+  const selectVoice = useCallback((voiceId: string) => {
+    setSelectedTtsVoice(voiceId);
+    void previewVoice(voiceId, ttsSpeed);
+  }, [previewVoice, ttsSpeed]);
+
+  const selectedVoiceIndex = ttsVoices.findIndex((v) => v.id === selectedTtsVoice);
+  const visibleOffsets = [-2, -1, 0, 1, 2] as const;
+  const visibleVoiceItems = ttsVoices.length === 0 ? [] : visibleOffsets.map((offset) => {
+    const index = ((selectedVoiceIndex < 0 ? 0 : selectedVoiceIndex) + offset + ttsVoices.length) % ttsVoices.length;
+    return { voice: ttsVoices[index], offset, index };
+  });
+
+  const selectAdjacentVoice = useCallback((dir: -1 | 1) => {
+    if (!ttsVoices.length) return;
+    const base = selectedVoiceIndex < 0 ? 0 : selectedVoiceIndex;
+    const next = (base + dir + ttsVoices.length) % ttsVoices.length;
+    selectVoice(ttsVoices[next].id);
+  }, [ttsVoices, selectedVoiceIndex, selectVoice]);
+
+  // Cleanup preview audio on unmount
+  useEffect(() => { return () => stopVoicePreview(); }, [stopVoicePreview]);
 
   useEffect(() => {
     const saved = localStorage.getItem("nt-theme");
@@ -439,6 +562,8 @@ export function VoiceAgentConsole() {
         transport.onMessage = (payload) => {
           if (payload.type === "ready") {
             streamReadyRef.current = true;
+            transport.send({ type: "tts_voice", voice: selectedTtsVoice });
+            transport.send({ type: "tts_speed", speed: ttsSpeed });
             const uid = crypto.randomUUID();
             activeUserIdRef.current = uid;
             activeAssistantIdRef.current = null;
@@ -832,6 +957,10 @@ export function VoiceAgentConsole() {
 
         if (payload.type === "ready") {
           streamReadyRef.current = true;
+          if (socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({ type: "tts_voice", voice: selectedTtsVoice }));
+            socket.send(JSON.stringify({ type: "tts_speed", speed: ttsSpeed }));
+          }
           // Create the user message bubble for this recording session
           const uid = crypto.randomUUID();
           activeUserIdRef.current = uid;
@@ -1207,6 +1336,18 @@ export function VoiceAgentConsole() {
             <button
               type="button"
               className="theme-toggle"
+              onClick={() => setIsSettingsOpen(true)}
+              aria-label="Voice settings"
+              title="Voice settings"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <circle cx="12" cy="12" r="3"/>
+                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+              </svg>
+            </button>
+            <button
+              type="button"
+              className="theme-toggle"
               onClick={toggleTheme}
               aria-label={isDark ? "Switch to light mode" : "Switch to dark mode"}
             >
@@ -1320,6 +1461,7 @@ export function VoiceAgentConsole() {
                 </Fragment>
               ))}
             </div>
+
           </article>
 
           <aside className="telemetry-stack">
@@ -1433,6 +1575,126 @@ export function VoiceAgentConsole() {
         </section>
 
       </section>
+
+      {isSettingsOpen && (
+        <div
+          className="settings-modal-backdrop"
+          onClick={() => { stopVoicePreview(); setIsSettingsOpen(false); }}
+          aria-label="Close settings"
+          role="presentation"
+        >
+          <div
+            className="settings-modal surface"
+            onClick={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-label="Voice settings"
+          >
+            <div className="settings-modal-header">
+              <h3>Voice Settings</h3>
+              <button
+                type="button"
+                className="settings-modal-close"
+                onClick={() => { stopVoicePreview(); setIsSettingsOpen(false); }}
+                aria-label="Close"
+              >
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+              </button>
+            </div>
+
+            {ttsVoices.length > 0 && (
+              <div className="settings-section">
+                <p className="kicker" style={{ marginBottom: 14 }}>Voice</p>
+                <div className="voice-carousel">
+                  <button
+                    type="button"
+                    className="voice-carousel-arrow"
+                    onClick={() => selectAdjacentVoice(-1)}
+                    aria-label="Previous voice"
+                  >
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>
+                  </button>
+
+                  <div className="voice-carousel-track">
+                    {visibleVoiceItems.map((item) => {
+                      const isSelected = item.voice.id === selectedTtsVoice;
+                      const isPreviewing = previewingVoice === item.voice.id;
+                      const parts = item.voice.name.match(/^(.+?)\s+\((.+)\)$/);
+                      const displayName = parts ? parts[1] : item.voice.name;
+                      const detail = parts ? parts[2] : "";
+                      return (
+                        <button
+                          key={`${item.voice.id}-${item.offset}`}
+                          type="button"
+                          className={[
+                            "voice-choice",
+                            `voice-choice--offset-${item.offset}`,
+                            isSelected ? "is-selected" : "",
+                            isPreviewing ? "is-previewing" : "",
+                          ].filter(Boolean).join(" ")}
+                          onClick={() => selectVoice(item.voice.id)}
+                          aria-pressed={isSelected}
+                          aria-label={`Select ${item.voice.name} voice`}
+                        >
+                          <span className="voice-choice-portrait" aria-hidden="true" />
+                          <span className="voice-choice-wave" aria-hidden="true">
+                            <span /><span /><span /><span />
+                          </span>
+                          <strong>{displayName}</strong>
+                          <small>{detail}</small>
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  <button
+                    type="button"
+                    className="voice-carousel-arrow"
+                    onClick={() => selectAdjacentVoice(1)}
+                    aria-label="Next voice"
+                  >
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
+                  </button>
+                </div>
+                <p className="settings-voice-selected">
+                  {ttsVoices.find((v) => v.id === selectedTtsVoice)?.name ?? selectedTtsVoice}
+                </p>
+              </div>
+            )}
+
+            <div className="settings-section">
+              <p className="kicker" style={{ marginBottom: 14 }}>Speech Speed</p>
+              <div className="speed-presets">
+                {SPEED_PRESETS.map((s) => (
+                  <button
+                    key={s}
+                    type="button"
+                    className={`speed-preset-btn${ttsSpeed === s ? " is-active" : ""}`}
+                    onClick={() => setTtsSpeed(s)}
+                  >
+                    {s}×
+                  </button>
+                ))}
+              </div>
+              <input
+                type="range"
+                className="speed-slider"
+                min={0.5}
+                max={2.0}
+                step={0.05}
+                value={ttsSpeed}
+                onChange={(e) => setTtsSpeed(parseFloat(e.target.value))}
+                aria-label="Speech speed"
+              />
+              <div className="speed-slider-labels">
+                <span>0.5×</span>
+                <span>{ttsSpeed.toFixed(2)}×</span>
+                <span>2.0×</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       <footer className="console-footer">
         <div className="console-footer-inner">

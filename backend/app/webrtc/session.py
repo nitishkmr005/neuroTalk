@@ -86,6 +86,7 @@ class WebRTCSession:
         # Conversation state
         self._conversation_history: list[dict[str, str]] = []
         self._voice_id: str = self._settings.tts_kokoro_voice
+        self._tts_speed: float = self._settings.tts_kokoro_speed
 
         # Barge-in state
         self._is_agent_speaking = False
@@ -182,6 +183,14 @@ class WebRTCSession:
         if event_type == "tts_voice":
             self._voice_id = str(payload.get("voice", self._settings.tts_kokoro_voice))
             logger.info("session_id={} event=tts_voice_changed voice={}", self.session_id, self._voice_id)
+
+        elif event_type == "tts_speed":
+            try:
+                speed = float(payload.get("speed", self._settings.tts_kokoro_speed))
+                self._tts_speed = max(0.5, min(2.0, speed))
+            except (TypeError, ValueError):
+                pass
+            logger.info("session_id={} event=tts_speed_changed speed={}", self.session_id, self._tts_speed)
 
         elif event_type == "start":
             # sample_rate from client is informational only — we always resample to 16 kHz
@@ -613,7 +622,7 @@ class WebRTCSession:
             if sentence is None or self._interrupt_event.is_set():
                 break
             try:
-                wav_bytes, sr = await tts_service.synthesize(sentence, voice=self._voice_id)
+                wav_bytes, sr = await tts_service.synthesize(sentence, voice=self._voice_id, speed=self._tts_speed)
             except Exception as err:
                 logger.warning(
                     "session_id={} event=tts_error error={}", self.session_id, err

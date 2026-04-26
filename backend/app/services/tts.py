@@ -69,17 +69,18 @@ class TTSService:
         model.generate(_WARMUP_TEXT)
         return model
 
-    def _run_inference(self, text: str, voice: str | None = None) -> tuple[bytes, int]:
-        return self._run_kokoro(text, voice) if self._backend == "kokoro" else self._run_chatterbox(text)
+    def _run_inference(self, text: str, voice: str | None = None, speed: float | None = None) -> tuple[bytes, int]:
+        return self._run_kokoro(text, voice, speed) if self._backend == "kokoro" else self._run_chatterbox(text)
 
-    def _run_kokoro(self, text: str, voice: str | None = None) -> tuple[bytes, int]:
+    def _run_kokoro(self, text: str, voice: str | None = None, speed: float | None = None) -> tuple[bytes, int]:
         settings = get_settings()
         from app.utils.emotion import strip_emotion_tags
         clean = strip_emotion_tags(text)
         v = voice or settings.tts_kokoro_voice
+        s = speed if speed is not None else settings.tts_kokoro_speed
         final_audio = None
         sample_rate = 24000
-        for result in self._model.generate(clean, voice=v, speed=settings.tts_kokoro_speed, lang_code=_KOKORO_LANG):
+        for result in self._model.generate(clean, voice=v, speed=s, lang_code=_KOKORO_LANG):
             final_audio = result.audio
             sample_rate = getattr(result, "sample_rate", 24000)
         if final_audio is None:
@@ -111,14 +112,14 @@ class TTSService:
             wf.writeframes(pcm16.tobytes())
         return buf.getvalue(), self._model.sr
 
-    async def synthesize(self, text: str, voice: str | None = None) -> tuple[bytes, int]:
+    async def synthesize(self, text: str, voice: str | None = None, speed: float | None = None) -> tuple[bytes, int]:
         if self._model is None:
             async with self._load_lock:
                 if self._model is None:
                     loop = asyncio.get_event_loop()
                     self._model = await loop.run_in_executor(None, self._load_model)
         loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, self._run_inference, text, voice)
+        return await loop.run_in_executor(None, self._run_inference, text, voice, speed)
 
 
 _tts_service: TTSService | None = None
