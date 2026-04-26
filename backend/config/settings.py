@@ -128,7 +128,7 @@ class Settings(BaseSettings):
     llm_max_history_turns: int = 6
     llm_system_prompt: str = VOICE_AGENT_PROMPT
     llm_llamacpp_model_path: Path = Path("models/llm/Llama-3.2-3B-Instruct-Q4_K_M.gguf")
-    llm_llamacpp_n_ctx: int = 400
+    llm_llamacpp_n_ctx: int = 2000
     llm_llamacpp_n_gpu_layers: int = -1
     llm_llamacpp_n_batch: int = 2048
     llm_llamacpp_flash_attn: bool = True
