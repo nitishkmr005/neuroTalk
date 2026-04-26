@@ -248,6 +248,7 @@ async def _stream_llamacpp(
 
     loop = asyncio.get_running_loop()
     queue: asyncio.Queue[str | None] = asyncio.Queue()
+    cancelled = False
 
     def _run() -> None:
         # Load (or reuse) the model inside the worker thread so the event loop
@@ -259,6 +260,8 @@ async def _stream_llamacpp(
                 max_tokens=1024,
                 stream=True,
             ):
+                if cancelled:
+                    break
                 delta: str = chunk["choices"][0]["delta"].get("content", "")
                 if delta:
                     loop.call_soon_threadsafe(queue.put_nowait, delta)
@@ -267,11 +270,14 @@ async def _stream_llamacpp(
 
     future = loop.run_in_executor(_llama_executor, _run)
 
-    while True:
-        token = await queue.get()
-        if token is None:
-            break
-        yield token
+    try:
+        while True:
+            token = await queue.get()
+            if token is None:
+                break
+            yield token
+    finally:
+        cancelled = True
 
     await future
 
