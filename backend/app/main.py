@@ -463,6 +463,17 @@ async def transcribe_stream(websocket: WebSocket) -> None:
                     sent_queue.put_nowait(remaining)
             sent_queue.put_nowait(None)
 
+            # Save the exchange to history now, inside finally, so it runs even
+            # when the task is cancelled mid-stream. Without this, interrupted
+            # responses are missing from history and the LLM re-answers the same
+            # question when the user says "All right." or similar.
+            if full_response and call_error is None:
+                conversation_history.append({"role": "user", "content": text})
+                conversation_history.append({"role": "assistant", "content": full_response})
+                max_msgs = settings.llm_max_history_turns * 2
+                if len(conversation_history) > max_msgs:
+                    conversation_history[:] = conversation_history[-max_msgs:]
+
         with suppress(asyncio.CancelledError):
             await tts_task
         active_tts_task = None
@@ -489,11 +500,6 @@ async def transcribe_stream(websocket: WebSocket) -> None:
 
         if full_response and call_error is None and not interrupt_event.is_set():
             llm_responded = True
-            conversation_history.append({"role": "user", "content": text})
-            conversation_history.append({"role": "assistant", "content": full_response})
-            max_msgs = settings.llm_max_history_turns * 2
-            if len(conversation_history) > max_msgs:
-                conversation_history[:] = conversation_history[-max_msgs:]
 
         if pending_llm_call is None:
             llm_task = None

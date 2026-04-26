@@ -716,6 +716,17 @@ class WebRTCSession:
                     sent_queue.put_nowait(remaining)
             sent_queue.put_nowait(None)
 
+            # Save the exchange to history inside finally so it runs even when
+            # the task is cancelled mid-stream. Without this, interrupted responses
+            # are missing from history and the LLM re-answers the same question
+            # when the user says "All right." or similar after a barge-in.
+            if full_response and call_error is None:
+                self._conversation_history.append({"role": "user", "content": text})
+                self._conversation_history.append({"role": "assistant", "content": full_response})
+                max_msgs = self._settings.llm_max_history_turns * 2
+                if len(self._conversation_history) > max_msgs:
+                    self._conversation_history[:] = self._conversation_history[-max_msgs:]
+
         with suppress(asyncio.CancelledError):
             await tts_task
         self._tts_task = None
@@ -729,13 +740,6 @@ class WebRTCSession:
             self._last_emit_at = 0.0
             if self._vad_stream is not None:
                 self._vad_stream.reset()
-
-        if full_response and call_error is None and not self._interrupt_event.is_set():
-            self._conversation_history.append({"role": "user", "content": text})
-            self._conversation_history.append({"role": "assistant", "content": full_response})
-            max_msgs = self._settings.llm_max_history_turns * 2
-            if len(self._conversation_history) > max_msgs:
-                self._conversation_history[:] = self._conversation_history[-max_msgs:]
 
         if self._pending_llm_call:
             next_text = self._pending_llm_call
