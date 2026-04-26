@@ -27,7 +27,7 @@ from pydantic import BaseModel
 from loguru import logger
 
 from app.models import HealthResponse, TranscriptionResponse
-from app.services.llm import stream_llm_response
+from app.services.llm import stream_llm_response, warmup_llamacpp
 from app.services.stt import get_stt_service
 from app.services.tts import get_available_voices, get_tts_service
 from app.services.vad import get_vad_service
@@ -88,6 +88,14 @@ async def _warmup_models() -> None:
         logger.info("event=tts_warmup_done ms={}", round((perf_counter() - tts_t0) * 1000))
     except Exception as err:
         logger.warning("event=tts_warmup_failed error={}", err)
+
+    if settings.llm_provider == "llama-cpp":
+        llm_t0 = perf_counter()
+        try:
+            await warmup_llamacpp(settings)
+            logger.info("event=llamacpp_warmup_done ms={}", round((perf_counter() - llm_t0) * 1000))
+        except Exception as err:
+            logger.warning("event=llamacpp_warmup_failed error={}", err)
 
 
 def _loop_exception_handler(loop: asyncio.AbstractEventLoop, context: dict) -> None:
@@ -479,7 +487,7 @@ async def transcribe_stream(websocket: WebSocket) -> None:
             call_error = str(llm_err)
             logger.warning("request_id={} event=llm_error error={}", request_id, llm_err)
             with suppress(Exception):
-                await send_json({"type": "llm_error", "message": "LLM unavailable — is Ollama running?"})
+                await send_json({"type": "llm_error", "message": "LLM unavailable — check your LLM provider and model."})
 
         finally:
             if not interrupt_event.is_set() and call_error is None:

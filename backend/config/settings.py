@@ -119,7 +119,7 @@ class Settings(BaseSettings):
     # llm_llamacpp_n_gpu_layers  GPU layers offloaded. -1 = all (Metal on Apple
     #                            Silicon). Set 0 to run entirely on CPU.
     # ─────────────────────────────────────────────────────────────────────────
-    llm_provider: str = "ollama"
+    llm_provider: str = "llama-cpp"
     ollama_host: str = "http://localhost:11434"
     llm_model: str = "llama3.2:3b"
     openai_api_key: str = ""
@@ -128,8 +128,10 @@ class Settings(BaseSettings):
     llm_max_history_turns: int = 6
     llm_system_prompt: str = VOICE_AGENT_PROMPT
     llm_llamacpp_model_path: Path = Path("models/llm/Llama-3.2-3B-Instruct-Q4_K_M.gguf")
-    llm_llamacpp_n_ctx: int = 4096
+    llm_llamacpp_n_ctx: int = 2048
     llm_llamacpp_n_gpu_layers: int = -1
+    llm_llamacpp_n_batch: int = 2048
+    llm_llamacpp_flash_attn: bool = True
 
     # ─────────────────────────────────────────────────────────────────────────
     # WEB SEARCH — live search tool injected into LLM context

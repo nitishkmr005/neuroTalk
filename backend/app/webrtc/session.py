@@ -709,7 +709,7 @@ class WebRTCSession:
                 "session_id={} event=llm_error error={}", self.session_id, err
             )
             await self._send_json(
-                {"type": "llm_error", "message": "LLM unavailable — is Ollama running?"}
+                {"type": "llm_error", "message": "LLM unavailable — check your LLM provider and model."}
             )
         finally:
             if not self._interrupt_event.is_set() and call_error is None:

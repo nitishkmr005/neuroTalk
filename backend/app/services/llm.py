@@ -185,29 +185,41 @@ async def _stream_gemini(
 
 # ── llama-cpp singleton ───────────────────────────────────────────────────────
 
+import threading as _threading
+
 _llama_instance = None
+_llama_lock = _threading.Lock()
+# Reuse one executor so the model is always called from the same thread,
+# avoiding re-entrant Metal/GPU context issues.
+_llama_executor = None
 
 
 def _get_llama(settings):
-    """Load the Llama model once and cache it for the lifetime of the process."""
+    """Load the Llama model once and cache it (called from worker thread only)."""
     global _llama_instance
-    if _llama_instance is None:
-        from llama_cpp import Llama
+    if _llama_instance is not None:
+        return _llama_instance
+    with _llama_lock:
+        if _llama_instance is None:
+            from llama_cpp import Llama
 
-        model_path = str(settings.llm_llamacpp_model_path)
-        logger.info(
-            "event=llamacpp_load model_path={} n_ctx={} n_gpu_layers={}",
-            model_path,
-            settings.llm_llamacpp_n_ctx,
-            settings.llm_llamacpp_n_gpu_layers,
-        )
-        _llama_instance = Llama(
-            model_path=model_path,
-            n_ctx=settings.llm_llamacpp_n_ctx,
-            n_gpu_layers=settings.llm_llamacpp_n_gpu_layers,
-            verbose=False,
-        )
-        logger.info("event=llamacpp_ready")
+            model_path = str(settings.llm_llamacpp_model_path)
+            logger.info(
+                "event=llamacpp_load model_path={} n_ctx={} n_gpu_layers={}",
+                model_path,
+                settings.llm_llamacpp_n_ctx,
+                settings.llm_llamacpp_n_gpu_layers,
+            )
+            _llama_instance = Llama(
+                model_path=model_path,
+                n_ctx=settings.llm_llamacpp_n_ctx,
+                n_gpu_layers=settings.llm_llamacpp_n_gpu_layers,
+                n_batch=settings.llm_llamacpp_n_batch,
+                flash_attn=settings.llm_llamacpp_flash_attn,
+                chat_format="llama-3",
+                verbose=False,
+            )
+            logger.info("event=llamacpp_ready")
     return _llama_instance
 
 
@@ -216,8 +228,9 @@ async def _stream_llamacpp(
 ) -> AsyncGenerator[str, None]:
     """Stream tokens from a local GGUF model via llama-cpp-python.
 
-    Inference is synchronous, so it runs in a thread-pool executor while tokens
-    are forwarded to an asyncio queue so callers can ``async for`` over them.
+    Both model loading and inference are synchronous and CPU/GPU-bound, so they
+    run in a single-threaded executor.  Tokens are forwarded to an asyncio queue
+    so callers can ``async for`` over them without blocking the event loop.
 
     Args:
         messages: OpenAI-compatible message list.
@@ -229,11 +242,17 @@ async def _stream_llamacpp(
     import asyncio
     from concurrent.futures import ThreadPoolExecutor
 
-    loop = asyncio.get_event_loop()
+    global _llama_executor
+    if _llama_executor is None:
+        _llama_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="llamacpp")
+
+    loop = asyncio.get_running_loop()
     queue: asyncio.Queue[str | None] = asyncio.Queue()
-    llm = _get_llama(settings)
 
     def _run() -> None:
+        # Load (or reuse) the model inside the worker thread so the event loop
+        # is never blocked during the ~5-10 s first-load.
+        llm = _get_llama(settings)
         try:
             for chunk in llm.create_chat_completion(
                 messages=messages,
@@ -246,8 +265,7 @@ async def _stream_llamacpp(
         finally:
             loop.call_soon_threadsafe(queue.put_nowait, None)
 
-    executor = ThreadPoolExecutor(max_workers=1)
-    future = loop.run_in_executor(executor, _run)
+    future = loop.run_in_executor(_llama_executor, _run)
 
     while True:
         token = await queue.get()
@@ -256,7 +274,26 @@ async def _stream_llamacpp(
         yield token
 
     await future
-    executor.shutdown(wait=False)
+
+
+async def warmup_llamacpp(settings) -> None:
+    """Pre-load the llama-cpp model inside the persistent executor at startup.
+
+    Creates ``_llama_executor`` if it doesn't exist yet, then runs ``_get_llama``
+    in it so the 2 GB model is resident before the first voice request arrives.
+
+    Args:
+        settings: Application settings (forwarded to ``_get_llama``).
+    """
+    import asyncio
+    from concurrent.futures import ThreadPoolExecutor
+
+    global _llama_executor
+    if _llama_executor is None:
+        _llama_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="llamacpp")
+
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(_llama_executor, lambda: _get_llama(settings))
 
 
 # ── Public interface ──────────────────────────────────────────────────────────

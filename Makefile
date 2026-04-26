@@ -7,14 +7,22 @@ TTS_BACKEND  ?= kokoro
 
 .PHONY: setup backend-install frontend-install backend frontend dev run \
         check free-ports free-backend-port free-frontend-port \
-        ollama ollama-pull tts-envs tts-report
+        ollama ollama-pull tts-envs tts-report install-llama-cpp
 
 # ── Install ───────────────────────────────────────────────────────────────────
 
 setup: backend-install frontend-install
 
-backend-install:
+backend-install: install-llama-cpp
 	$(UV_BACKEND) sync --group $(TTS_BACKEND)_model
+
+install-llama-cpp:
+	@if $(UV_BACKEND) run python -c "import llama_cpp" 2>/dev/null; then \
+		echo "llama-cpp-python already installed, skipping"; \
+	else \
+		echo "Installing llama-cpp-python with Metal support..."; \
+		CMAKE_ARGS="-DGGML_METAL=on" uv --directory backend pip install "llama-cpp-python>=0.3.0" --no-cache; \
+	fi
 
 frontend-install:
 	$(NPM_FRONTEND) install

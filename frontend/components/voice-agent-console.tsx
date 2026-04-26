@@ -682,7 +682,9 @@ export function VoiceAgentConsole() {
             const aid = activeAssistantIdRef.current;
             if (aid)
               updateMsg(aid, {
-                text: "AI unavailable — make sure Ollama is running.",
+                text: typeof payload.message === "string" && payload.message
+                  ? payload.message
+                  : "AI unavailable — check your LLM provider and model.",
                 isStreaming: false,
                 isError: true,
               });
@@ -1063,7 +1065,7 @@ export function VoiceAgentConsole() {
 
         if (payload.type === "llm_error") {
           const aid = activeAssistantIdRef.current;
-          if (aid) updateMsg(aid, { text: "AI unavailable — make sure Ollama is running.", isStreaming: false, isError: true });
+          if (aid) updateMsg(aid, { text: typeof payload.message === "string" && payload.message ? payload.message : "AI unavailable — check your LLM provider and model.", isStreaming: false, isError: true });
           if (!isRecordingRef.current) {
             normalCloseRef.current = true;
             socket.close();
