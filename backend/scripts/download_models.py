@@ -15,6 +15,10 @@ from pathlib import Path
 _SMART_TURN_HF_REPO = "nitishkmr005/smart-turn"
 _SMART_TURN_HF_FILE = "smart-turn-v3.2-cpu.onnx"
 
+_LLM_HF_REPO = "bartowski/Llama-3.2-3B-Instruct-GGUF"
+_LLM_HF_FILE = "Llama-3.2-3B-Instruct-Q4_K_M.gguf"
+_LLM_DEST = Path("models/llm") / _LLM_HF_FILE
+
 
 def _bar(block: int, block_size: int, total: int) -> None:
     downloaded = block * block_size
@@ -130,13 +134,40 @@ def download_smart_turn() -> None:
         print("Whisper-base extractor already present — skipping.")
 
 
+def download_llm() -> None:
+    if _LLM_DEST.exists():
+        print(f"LLM model already present — skipping. ({_LLM_DEST.stat().st_size / 1_048_576:.0f} MB)")
+        return
+    _LLM_DEST.parent.mkdir(parents=True, exist_ok=True)
+    print(f"Downloading Llama 3.2 3B Instruct Q4_K_M GGUF (~2.0 GB) …")
+    try:
+        from huggingface_hub import hf_hub_download
+        hf_hub_download(
+            repo_id=_LLM_HF_REPO,
+            filename=_LLM_HF_FILE,
+            local_dir=str(_LLM_DEST.parent),
+        )
+        print(f"  Saved to {_LLM_DEST} ({_LLM_DEST.stat().st_size / 1_048_576:.0f} MB)")
+    except Exception as err:
+        print(f"  Failed: {err}", file=sys.stderr)
+        print("  Install huggingface_hub: uv pip install huggingface_hub", file=sys.stderr)
+        sys.exit(1)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Download NeuroTalk runtime models.")
     parser.add_argument("--skip-stt", action="store_true")
     parser.add_argument("--skip-vad", action="store_true")
     parser.add_argument("--skip-kokoro", action="store_true")
     parser.add_argument("--skip-smart-turn", action="store_true")
+    parser.add_argument("--skip-llm", action="store_true")
+    parser.add_argument("--only-llm", action="store_true", help="Download only the LLM GGUF model.")
     args = parser.parse_args()
+
+    if args.only_llm:
+        download_llm()
+        print("\nLLM model ready.")
+        return
 
     if not args.skip_stt:
         download_stt()
@@ -146,6 +177,8 @@ def main() -> None:
         download_kokoro()
     if not args.skip_smart_turn:
         download_smart_turn()
+    if not args.skip_llm:
+        download_llm()
 
     print("\nAll models ready.")
 

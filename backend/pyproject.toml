@@ -75,6 +75,9 @@ anthropic_llm = [
 gemini_llm = [
   "google-generativeai>=0.8.0",
 ]
+llama_cpp_llm = [
+  "llama-cpp-python>=0.3.0",
+]
 dev = [
   "pytest>=8.0.0",
   "pytest-asyncio>=0.23.0",

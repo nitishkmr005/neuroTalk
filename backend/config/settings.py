@@ -103,9 +103,9 @@ class Settings(BaseSettings):
     # ─────────────────────────────────────────────────────────────────────────
     # LLM — language model provider and context
     #
-    # llm_provider          ollama | openai | anthropic | gemini.
+    # llm_provider          ollama | openai | anthropic | gemini | llama-cpp.
     # ollama_host           Base URL for a local Ollama server.
-    # llm_model             Model tag. Recommended Ollama models (ollama pull):
+    # llm_model             Model tag for Ollama/OpenAI/Anthropic/Gemini providers.
     #                         qwen3:4b  — fast, strong tool-calling, low memory
     #                         qwen3:8b  — higher quality, ~2x slower
     #                         gemma3:1b — fastest, minimal memory, lower quality
@@ -113,6 +113,11 @@ class Settings(BaseSettings):
     # gemini_api_key        selected provider.
     # llm_max_history_turns Number of user+assistant turn pairs kept in context.
     # llm_system_prompt     System prompt injected at the top of every request.
+    # llm_llamacpp_model_path  Path to the GGUF model file for llama-cpp provider.
+    #                          Run scripts/download_models.py --only-llm to fetch.
+    # llm_llamacpp_n_ctx    Context window size in tokens (default 4096).
+    # llm_llamacpp_n_gpu_layers  GPU layers offloaded. -1 = all (Metal on Apple
+    #                            Silicon). Set 0 to run entirely on CPU.
     # ─────────────────────────────────────────────────────────────────────────
     llm_provider: str = "ollama"
     ollama_host: str = "http://localhost:11434"
@@ -122,6 +127,9 @@ class Settings(BaseSettings):
     gemini_api_key: str = ""
     llm_max_history_turns: int = 6
     llm_system_prompt: str = VOICE_AGENT_PROMPT
+    llm_llamacpp_model_path: Path = Path("models/llm/Llama-3.2-3B-Instruct-Q4_K_M.gguf")
+    llm_llamacpp_n_ctx: int = 4096
+    llm_llamacpp_n_gpu_layers: int = -1
 
     # ─────────────────────────────────────────────────────────────────────────
     # WEB SEARCH — live search tool injected into LLM context

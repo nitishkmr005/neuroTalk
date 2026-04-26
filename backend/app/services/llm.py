@@ -183,6 +183,82 @@ async def _stream_gemini(
             yield chunk.text
 
 
+# ── llama-cpp singleton ───────────────────────────────────────────────────────
+
+_llama_instance = None
+
+
+def _get_llama(settings):
+    """Load the Llama model once and cache it for the lifetime of the process."""
+    global _llama_instance
+    if _llama_instance is None:
+        from llama_cpp import Llama
+
+        model_path = str(settings.llm_llamacpp_model_path)
+        logger.info(
+            "event=llamacpp_load model_path={} n_ctx={} n_gpu_layers={}",
+            model_path,
+            settings.llm_llamacpp_n_ctx,
+            settings.llm_llamacpp_n_gpu_layers,
+        )
+        _llama_instance = Llama(
+            model_path=model_path,
+            n_ctx=settings.llm_llamacpp_n_ctx,
+            n_gpu_layers=settings.llm_llamacpp_n_gpu_layers,
+            verbose=False,
+        )
+        logger.info("event=llamacpp_ready")
+    return _llama_instance
+
+
+async def _stream_llamacpp(
+    messages: list[dict[str, str]], settings
+) -> AsyncGenerator[str, None]:
+    """Stream tokens from a local GGUF model via llama-cpp-python.
+
+    Inference is synchronous, so it runs in a thread-pool executor while tokens
+    are forwarded to an asyncio queue so callers can ``async for`` over them.
+
+    Args:
+        messages: OpenAI-compatible message list.
+        settings: Application settings (uses ``llm_llamacpp_*`` fields).
+
+    Yields:
+        Token strings as they are produced by the model.
+    """
+    import asyncio
+    from concurrent.futures import ThreadPoolExecutor
+
+    loop = asyncio.get_event_loop()
+    queue: asyncio.Queue[str | None] = asyncio.Queue()
+    llm = _get_llama(settings)
+
+    def _run() -> None:
+        try:
+            for chunk in llm.create_chat_completion(
+                messages=messages,
+                max_tokens=1024,
+                stream=True,
+            ):
+                delta: str = chunk["choices"][0]["delta"].get("content", "")
+                if delta:
+                    loop.call_soon_threadsafe(queue.put_nowait, delta)
+        finally:
+            loop.call_soon_threadsafe(queue.put_nowait, None)
+
+    executor = ThreadPoolExecutor(max_workers=1)
+    future = loop.run_in_executor(executor, _run)
+
+    while True:
+        token = await queue.get()
+        if token is None:
+            break
+        yield token
+
+    await future
+    executor.shutdown(wait=False)
+
+
 # ── Public interface ──────────────────────────────────────────────────────────
 
 async def stream_llm_response(
@@ -197,10 +273,14 @@ async def stream_llm_response(
     3. Dispatches to the configured provider and yields tokens.
 
     Supported providers (set ``LLM_PROVIDER`` in ``.env``):
-    - ``ollama``    — local Ollama instance (default)
-    - ``openai``    — OpenAI API (requires ``uv sync --group openai_llm``)
-    - ``anthropic`` — Anthropic API (requires ``uv sync --group anthropic_llm``)
-    - ``gemini``    — Google Gemini API (requires ``uv sync --group gemini_llm``)
+    - ``ollama``     — local Ollama instance (default)
+    - ``openai``     — OpenAI API (requires ``uv sync --group openai_llm``)
+    - ``anthropic``  — Anthropic API (requires ``uv sync --group anthropic_llm``)
+    - ``gemini``     — Google Gemini API (requires ``uv sync --group gemini_llm``)
+    - ``llama-cpp``  — local GGUF model via llama-cpp-python (requires
+                       ``uv sync --group llama_cpp_llm`` and a GGUF file at
+                       ``llm_llamacpp_model_path``; run
+                       ``python scripts/download_models.py --only-llm`` to fetch)
 
     Args:
         transcript: The user's transcribed speech to send as the current message.
@@ -251,8 +331,11 @@ async def stream_llm_response(
     elif settings.llm_provider == "gemini":
         async for token in _stream_gemini(messages, settings):
             yield token
+    elif settings.llm_provider == "llama-cpp":
+        async for token in _stream_llamacpp(messages, settings):
+            yield token
     else:
         raise ValueError(
             f"Unknown llm_provider {settings.llm_provider!r}. "
-            "Choose: ollama | openai | anthropic | gemini"
+            "Choose: ollama | openai | anthropic | gemini | llama-cpp"
         )
