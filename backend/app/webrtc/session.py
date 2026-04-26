@@ -805,13 +805,17 @@ class WebRTCSession:
         if self._closed:
             return
         self._closed = True
-        for task in (
+        tasks = [t for t in (
             self._audio_task,
             self._silence_debounce_task,
             self._speech_finalization_task,
             self._tts_task,
             self._llm_task,
-        ):
-            if task and not task.done():
-                task.cancel()
+        ) if t and not t.done()]
+        for task in tasks:
+            task.cancel()
+        # Await cancelled tasks so they finish before ICE/transport teardown.
+        # Without this, tasks outlive the transport and hit aioice's closed socket.
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
         logger.info("session_id={} event=rtc_session_closed", self.session_id)

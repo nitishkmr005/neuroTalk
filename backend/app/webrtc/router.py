@@ -66,5 +66,8 @@ async def close_session(session_id: str) -> None:
     session = _sessions.pop(session_id, None)
     if session is None:
         raise HTTPException(status_code=404, detail="Session not found")
+    # Cancel and await all application tasks before closing the PC so no
+    # in-flight coroutines are racing against ICE/transport teardown.
+    await session._cleanup()
     await session.pc.close()
     logger.info("session_id={} event=webrtc_session_deleted", session_id)
