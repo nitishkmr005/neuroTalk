@@ -13,8 +13,9 @@ TTS_BACKEND  ?= kokoro
 
 setup: backend-install frontend-install
 
-backend-install: install-llama-cpp
+backend-install:
 	$(UV_BACKEND) sync --group $(TTS_BACKEND)_model
+	$(MAKE) install-llama-cpp
 
 install-llama-cpp:
 	@if $(UV_BACKEND) run python -c "import llama_cpp" 2>/dev/null; then \
