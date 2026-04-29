@@ -106,7 +106,7 @@ class SmartTurnService:
             audio = audio[-128_000:]
 
         features = self._extractor(
-            audio, sampling_rate=16_000, return_tensors="np"
+            audio, sampling_rate=16_000, return_tensors="np", max_length=128_000
         )
         input_name = self._session.get_inputs()[0].name
         output_name = self._session.get_outputs()[0].name

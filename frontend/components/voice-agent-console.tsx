@@ -96,7 +96,7 @@ const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8000
 const websocketUrl = `${backendUrl.replace(/^http/, "ws")}/ws/transcribe`;
 const initialWaveLevels = waveformHeights.map(() => 0.18);
 const BARGE_IN_THRESHOLD = 0.15;
-const BARGE_IN_FRAMES = 1;
+const BARGE_IN_FRAMES = 2;
 const DEFAULT_TTS_VOICE = "af_heart";
 const DEFAULT_TTS_SPEED = 1.0;
 const SPEED_PRESETS = [0.8, 1.0, 1.15, 1.3] as const;

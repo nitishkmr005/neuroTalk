@@ -62,10 +62,10 @@ class Settings(BaseSettings):
     #                           Lower = more responsive; higher = avoids
     #                           splitting one utterance into two replies.
     # ─────────────────────────────────────────────────────────────────────────
-    stream_emit_interval_ms: int = 1200
-    stream_min_audio_ms: int = 900
+    stream_emit_interval_ms: int = 700
+    stream_min_audio_ms: int = 500
     stream_llm_min_chars: int = 8
-    stream_llm_silence_ms: int = 950
+    stream_llm_silence_ms: int = 500
 
     # ─────────────────────────────────────────────────────────────────────────
     # STREAMING VAD — dedicated voice-activity detector for endpointing
@@ -80,7 +80,7 @@ class Settings(BaseSettings):
     # ─────────────────────────────────────────────────────────────────────────
     stream_vad_enabled: bool = True
     stream_vad_threshold: float = 0.6
-    stream_vad_min_silence_ms: int = 800
+    stream_vad_min_silence_ms: int = 500
     stream_vad_speech_pad_ms: int = 250
     stream_vad_frame_samples: int = 512
 
@@ -158,12 +158,17 @@ class Settings(BaseSettings):
     # stream_smart_turn_base_wait_ms  Polling interval while awaiting model
     #                               confirmation (ms).
     # stream_smart_turn_max_budget_ms  Max extra wait beyond silence timeout.
+    # stream_smart_turn_incomplete_wait_ms  Extra wait added when Smart Turn
+    #                               consistently says "not complete" after the
+    #                               budget. Lets the user finish their thought;
+    #                               VAD "start" cancels it if they resume.
     # ─────────────────────────────────────────────────────────────────────────
-    stream_smart_turn_enabled: bool = False
-    stream_smart_turn_threshold: float = 0.5
+    stream_smart_turn_enabled: bool = True
+    stream_smart_turn_threshold: float = 0.65
     stream_smart_turn_model_path: str = "models/smart_turn/smart-turn-v3.2-cpu.onnx"
     stream_smart_turn_base_wait_ms: int = 200
-    stream_smart_turn_max_budget_ms: int = 1000
+    stream_smart_turn_max_budget_ms: int = 600
+    stream_smart_turn_incomplete_wait_ms: int = 1500
 
     # ─────────────────────────────────────────────────────────────────────────
     # MODEL DIRECTORIES — all models loaded from local disk; never downloaded

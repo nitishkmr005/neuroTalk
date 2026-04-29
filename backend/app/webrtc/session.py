@@ -299,7 +299,18 @@ class WebRTCSession:
                                 round(vad_event.speech_prob, 4),
                             )
                             if not self._is_agent_speaking:
-                                self._schedule_speech_finalization("vad_end")
+                                if self._settings.stream_smart_turn_enabled:
+                                    # Route through debounce so Smart Turn can gate
+                                    # on semantic completeness before finalising.
+                                    if self._silence_debounce_task and not self._silence_debounce_task.done():
+                                        self._silence_debounce_task.cancel()
+                                    self._silence_debounce_task = asyncio.create_task(
+                                        self._silence_debounce_then_fire(
+                                            self._last_text_sent, "vad_end", vad_triggered=True
+                                        )
+                                    )
+                                else:
+                                    self._schedule_speech_finalization("vad_end")
                 elif self._is_agent_speaking:
                     # Fallback RMS gate when the dedicated VAD is disabled.
                     samples = resampled.to_ndarray().astype(np.float32) / 32_768.0
@@ -525,7 +536,9 @@ class WebRTCSession:
 
     # ── LLM scheduling ───────────────────────────────────────────────────────
 
-    async def _silence_debounce_then_fire(self, text: str, trigger: str) -> None:
+    async def _silence_debounce_then_fire(
+        self, text: str, trigger: str, vad_triggered: bool = False
+    ) -> None:
         """Wait for the silence window, then trigger speech finalization or an LLM call.
 
         After the silence timeout, optionally polls the Smart Turn model for up
@@ -536,9 +549,13 @@ class WebRTCSession:
             text: Transcript snapshot at the time the debounce was armed.
             trigger: Source label forwarded to ``_schedule_speech_finalization``
                      or used for logging (e.g. ``"debounced_partial"``).
+            vad_triggered: When True (VAD "end" path), uses a 50 ms grace wait
+                           instead of the full silence timeout so Smart Turn runs
+                           immediately after VAD has already confirmed silence.
         """
         try:
-            await asyncio.sleep(self._settings.stream_llm_silence_ms / 1000)
+            wait_ms = 50 if vad_triggered else self._settings.stream_llm_silence_ms
+            await asyncio.sleep(wait_ms / 1000)
         except asyncio.CancelledError:
             return
 
@@ -546,13 +563,26 @@ class WebRTCSession:
             from app.services.smart_turn import get_smart_turn_service
             smart_turn = get_smart_turn_service()
             if smart_turn.is_loaded:
+                turn_complete = False
                 deadline = perf_counter() + self._settings.stream_smart_turn_max_budget_ms / 1000
                 while perf_counter() < deadline:
                     is_complete, _ = smart_turn.predict(bytes(self._pcm_buffer))
                     if is_complete:
+                        turn_complete = True
                         break
                     try:
                         await asyncio.sleep(self._settings.stream_smart_turn_base_wait_ms / 1000)
+                    except asyncio.CancelledError:
+                        return
+
+                if not turn_complete:
+                    # Smart Turn says utterance is incomplete — give the user
+                    # extra time to continue their thought.  VAD "start" will
+                    # cancel this task the moment they resume speaking.
+                    try:
+                        await asyncio.sleep(
+                            self._settings.stream_smart_turn_incomplete_wait_ms / 1000
+                        )
                     except asyncio.CancelledError:
                         return
 
