@@ -14,7 +14,7 @@ TTS_BACKEND  ?= kokoro
 setup: backend-install frontend-install
 
 backend-install:
-	$(UV_BACKEND) sync --group $(TTS_BACKEND)_model
+	$(UV_BACKEND) sync --group $(TTS_BACKEND)_model --group deepfilter
 	$(MAKE) install-llama-cpp
 
 install-llama-cpp:

@@ -66,6 +66,10 @@ smart_turn = [
   "onnxruntime>=1.18.0",
   "transformers>=4.40.0",
 ]
+deepfilter = [
+  "deepfilternet>=0.5.6; python_version < '3.13'",
+  "scipy>=1.11.0",
+]
 openai_llm = [
   "openai>=1.0.0",
 ]
