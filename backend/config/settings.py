@@ -183,6 +183,18 @@ class Settings(BaseSettings):
     # stream_smart_turn_extractor_dir  Whisper feature extractor weights for
     #                                  Smart Turn (only loaded when enabled).
     # ─────────────────────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────────────────
+    # DENOISE — DeepFilterNet3 noise suppression applied before STT
+    #
+    # denoise_enabled       Master switch. When disabled (or deepfilternet not
+    #                       installed) audio is passed to Whisper unmodified.
+    # denoise_model_dir     Local directory where DeepFilterNet3 weights are
+    #                       stored. Run scripts/download_deepfilter_model.py to
+    #                       populate it. Relative to backend/.
+    # ─────────────────────────────────────────────────────────────────────────
+    denoise_enabled: bool = True
+    denoise_model_dir: Path = Path("models/deepfilter")
+
     stt_model_dir: Path = Path("models/stt")
     vad_model_path: Path = Path("models/vad/silero_vad.jit")
     tts_kokoro_model_dir: Path = Path("models/kokoro")

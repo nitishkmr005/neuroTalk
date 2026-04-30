@@ -14,6 +14,7 @@ from aiortc import MediaStreamTrack, RTCConfiguration, RTCIceServer, RTCPeerConn
 from aiortc.mediastreams import MediaStreamError
 from loguru import logger
 
+from app.services.denoise import get_denoise_service
 from app.services.llm import stream_llm_response
 from app.services.stt import get_stt_service
 from app.services.tts import get_tts_service
@@ -77,6 +78,7 @@ class WebRTCSession:
 
         # Concurrency helpers
         self._send_lock = asyncio.Lock()
+        self._transcribe_lock = asyncio.Lock()  # serialises denoise+STT; both are CPU-bound
         self._llm_task: asyncio.Task | None = None
         self._tts_task: asyncio.Task | None = None
         self._pending_llm_call: str | None = None
@@ -225,7 +227,8 @@ class WebRTCSession:
 
             if self._pcm_buffer:
                 loop = asyncio.get_event_loop()
-                result = await loop.run_in_executor(None, self._transcribe_buffer)
+                async with self._transcribe_lock:
+                    result = await loop.run_in_executor(None, self._transcribe_buffer)
                 await self._send_json({"type": "final", **result})
                 final_text = str(result.get("text", "")).strip()
                 if final_text and final_text != self._latest_llm_input:
@@ -356,7 +359,8 @@ class WebRTCSession:
             return
 
         loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(None, self._transcribe_buffer)
+        async with self._transcribe_lock:
+            result = await loop.run_in_executor(None, self._transcribe_buffer)
         if self._speech_finalization_task and not self._speech_finalization_task.done():
             self._last_emit_at = perf_counter()
             logger.info(
@@ -395,11 +399,12 @@ class WebRTCSession:
         started_at = perf_counter()
         temp_path = self._settings.temp_dir / f"{self.session_id}_rtc.wav"
         try:
+            pcm = get_denoise_service().enhance(bytes(self._pcm_buffer), self._sample_rate)
             with wave.open(str(temp_path), "wb") as wf:
                 wf.setnchannels(1)
                 wf.setsampwidth(2)
                 wf.setframerate(self._sample_rate)
-                wf.writeframes(bytes(self._pcm_buffer))
+                wf.writeframes(pcm)
 
             service = get_stt_service()
             result = service.transcribe(
@@ -471,7 +476,8 @@ class WebRTCSession:
                 self._silence_debounce_task = None
 
             loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(None, self._transcribe_buffer)
+            async with self._transcribe_lock:
+                result = await loop.run_in_executor(None, self._transcribe_buffer)
 
             if self._llm_task and not self._llm_task.done():
                 logger.info(

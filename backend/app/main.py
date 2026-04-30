@@ -27,6 +27,7 @@ from pydantic import BaseModel
 from loguru import logger
 
 from app.models import HealthResponse, TranscriptionResponse
+from app.services.denoise import get_denoise_service
 from app.services.llm import stream_llm_response, warmup_llamacpp
 from app.services.stt import get_stt_service
 from app.services.tts import get_available_voices, get_tts_service
@@ -96,6 +97,14 @@ async def _warmup_models() -> None:
             logger.info("event=llamacpp_warmup_done ms={}", round((perf_counter() - llm_t0) * 1000))
         except Exception as err:
             logger.warning("event=llamacpp_warmup_failed error={}", err)
+
+    if settings.denoise_enabled:
+        denoise_t0 = perf_counter()
+        try:
+            await loop.run_in_executor(None, get_denoise_service)
+            logger.info("event=denoise_warmup_done ms={}", round((perf_counter() - denoise_t0) * 1000))
+        except Exception as err:
+            logger.warning("event=denoise_warmup_failed error={}", err)
 
 
 def _loop_exception_handler(loop: asyncio.AbstractEventLoop, context: dict) -> None:
