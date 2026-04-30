@@ -41,6 +41,7 @@ type TtsVoice = { id: string; name: string };
 type StreamMessage = {
   type: "ready" | "partial" | "final" | "error" | "llm_start" | "llm_partial" | "llm_final" | "llm_error" | "tts_start" | "tts_audio" | "tts_done" | "tts_interrupted";
   request_id?: string;
+  llm_seq?: number;
   text?: string;
   user_text?: string;
   message?: string;
@@ -179,15 +180,23 @@ export function VoiceAgentConsole() {
   const chatEndRef = useRef<HTMLDivElement | null>(null);
 
   // Audio queue: sentences arrive one at a time; we play them sequentially.
-  type TtsChunk = { buffer: AudioBuffer; text: string };
+  type TtsChunk = {
+    buffer: AudioBuffer;
+    text: string;
+    generation: number;
+    assistantId: string | null;
+  };
   const ttsQueueRef = useRef<TtsChunk[]>([]);
   const isTtsPlayingRef = useRef(false);
   const ttsAllChunksReceivedRef = useRef(false);
+  const ttsGenerationRef = useRef(0);
   // Text revealed so far in the current assistant turn (accumulates across chunks).
   const revealedTextRef = useRef("");
   // Counts tts_audio chunks whose decodeAudioData hasn't fired yet — prevents
   // premature finalisation when tts_done arrives before all decodes complete.
   const pendingDecodesRef = useRef(0);
+  const activeLlmSeqRef = useRef<number | null>(null);
+  const interruptedLlmSeqsRef = useRef<Set<number>>(new Set());
 
   const websocketRef = useRef<WebSocket | null>(null);
   const webrtcRef = useRef<WebRTCTransport | null>(null);
@@ -380,6 +389,7 @@ export function VoiceAgentConsole() {
     webrtcRef.current = null;
 
     // Clear audio queue
+    ttsGenerationRef.current++;
     ttsQueueRef.current = [];
     isTtsPlayingRef.current = false;
     ttsAllChunksReceivedRef.current = false;
@@ -393,6 +403,7 @@ export function VoiceAgentConsole() {
   }, []);
 
   const clearTtsQueue = () => {
+    ttsGenerationRef.current++;
     ttsSourceRef.current?.stop();
     ttsSourceRef.current = null;
     ttsQueueRef.current = [];
@@ -405,6 +416,50 @@ export function VoiceAgentConsole() {
       revealRafRef.current = null;
     }
   };
+
+  const getPayloadLlmSeq = useCallback((payload: unknown): number | null => {
+    if (typeof payload !== "object" || payload === null || !("llm_seq" in payload)) {
+      return null;
+    }
+    const seq = (payload as { llm_seq?: unknown }).llm_seq;
+    if (typeof seq !== "number" || !Number.isFinite(seq)) {
+      return null;
+    }
+    return seq;
+  }, []);
+
+  const interruptCurrentLlmTurn = useCallback(() => {
+    const seq = activeLlmSeqRef.current;
+    if (seq !== null) {
+      interruptedLlmSeqsRef.current.add(seq);
+      activeLlmSeqRef.current = null;
+    }
+  }, []);
+
+  const shouldAcceptLlmStart = useCallback((payload: unknown): boolean => {
+    const seq = getPayloadLlmSeq(payload);
+    if (seq === null) {
+      activeLlmSeqRef.current = null;
+      return true;
+    }
+    if (interruptedLlmSeqsRef.current.has(seq)) {
+      return false;
+    }
+    const activeSeq = activeLlmSeqRef.current;
+    if (activeSeq !== null && seq < activeSeq) {
+      return false;
+    }
+    activeLlmSeqRef.current = seq;
+    return true;
+  }, [getPayloadLlmSeq]);
+
+  const shouldProcessLlmTurnEvent = useCallback((payload: unknown): boolean => {
+    const seq = getPayloadLlmSeq(payload);
+    if (seq === null) return true;
+    if (interruptedLlmSeqsRef.current.has(seq)) return false;
+    const activeSeq = activeLlmSeqRef.current;
+    return activeSeq === null || seq === activeSeq;
+  }, [getPayloadLlmSeq]);
 
   const playNextTtsChunk = useCallback(() => {
     if (ttsQueueRef.current.length === 0) {
@@ -434,6 +489,13 @@ export function VoiceAgentConsole() {
     }
 
     const chunk = ttsQueueRef.current.shift()!;
+    if (
+      chunk.generation !== ttsGenerationRef.current ||
+      chunk.assistantId !== activeAssistantIdRef.current
+    ) {
+      playNextTtsChunk();
+      return;
+    }
     const audioCtx = audioContextRef.current ?? new AudioContext();
     if (!audioContextRef.current) audioContextRef.current = audioCtx;
 
@@ -533,6 +595,8 @@ export function VoiceAgentConsole() {
       normalCloseRef.current = false;
       interruptSentRef.current = false;
       bargeinFrameCountRef.current = 0;
+      activeLlmSeqRef.current = null;
+      interruptedLlmSeqsRef.current.clear();
 
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
@@ -631,6 +695,7 @@ export function VoiceAgentConsole() {
           }
 
           if (payload.type === "llm_start") {
+            if (!shouldAcceptLlmStart(payload)) return;
             const uid = activeUserIdRef.current;
             const userText = typeof payload.user_text === "string" ? payload.user_text.trim() : "";
             if (uid) {
@@ -648,8 +713,10 @@ export function VoiceAgentConsole() {
               const prevText = revealedTextRef.current || pendingAssistantTextRef.current;
               if (prevText) updateMsg(prevAid, { text: prevText, isStreaming: false });
             }
+            clearTtsQueue();
             activeAssistantIdRef.current = null;
             pendingAssistantTextRef.current = "";
+            revealedTextRef.current = "";
             ttsAudioReceivedRef.current = false;
             if (revealRafRef.current !== null) {
               cancelAnimationFrame(revealRafRef.current);
@@ -666,12 +733,14 @@ export function VoiceAgentConsole() {
           }
 
           if (payload.type === "llm_partial") {
+            if (!shouldProcessLlmTurnEvent(payload)) return;
             pendingAssistantTextRef.current = typeof payload.text === "string" ? payload.text : "";
             startTransition(() => { setMode("responding"); });
             return;
           }
 
           if (payload.type === "llm_final") {
+            if (!shouldProcessLlmTurnEvent(payload)) return;
             pendingAssistantTextRef.current = typeof payload.text === "string" ? payload.text : "";
             if (payload.llm_ms != null) setLlmLatencyMs(Number(payload.llm_ms));
             startTransition(() => { setMode("listening"); });
@@ -679,6 +748,7 @@ export function VoiceAgentConsole() {
           }
 
           if (payload.type === "llm_error") {
+            if (!shouldProcessLlmTurnEvent(payload)) return;
             const aid = activeAssistantIdRef.current;
             if (aid)
               updateMsg(aid, {
@@ -692,6 +762,7 @@ export function VoiceAgentConsole() {
           }
 
           if (payload.type === "tts_start") {
+            if (!shouldProcessLlmTurnEvent(payload)) return;
             // Stop any currently playing audio before starting the new sequence.
             // Prevents parallel playback when a second response starts before the
             // first finishes (e.g. after a short-pause false LLM trigger).
@@ -703,6 +774,7 @@ export function VoiceAgentConsole() {
           }
 
           if (payload.type === "tts_audio") {
+            if (!shouldProcessLlmTurnEvent(payload)) return;
             if (payload.tts_ms != null) setTtsLatencyMs(Number(payload.tts_ms));
             const sentenceText = typeof payload.sentence_text === "string" ? payload.sentence_text : (pendingAssistantTextRef.current ?? "");
             const data = typeof payload.data === "string" ? payload.data : "";
@@ -712,17 +784,31 @@ export function VoiceAgentConsole() {
             const audioCtx = audioContextRef.current ?? new AudioContext();
             if (!audioContextRef.current) audioContextRef.current = audioCtx;
             ttsAudioReceivedRef.current = true;
+            const decodeGeneration = ttsGenerationRef.current;
+            const decodeAssistantId = activeAssistantIdRef.current;
             pendingDecodesRef.current++;
             void audioCtx.decodeAudioData(
               bytes.buffer.slice(0),
               (buffer) => {
-                pendingDecodesRef.current--;
-                ttsQueueRef.current.push({ buffer, text: sentenceText });
+                pendingDecodesRef.current = Math.max(0, pendingDecodesRef.current - 1);
+                if (
+                  ttsGenerationRef.current !== decodeGeneration ||
+                  activeAssistantIdRef.current !== decodeAssistantId ||
+                  !shouldProcessLlmTurnEvent(payload)
+                ) {
+                  return;
+                }
+                ttsQueueRef.current.push({
+                  buffer,
+                  text: sentenceText,
+                  generation: decodeGeneration,
+                  assistantId: decodeAssistantId,
+                });
                 if (!isTtsPlayingRef.current) playNextTtsChunk();
               },
               () => {
                 // Decode failed — drop the chunk but unblock the finalization counter.
-                pendingDecodesRef.current--;
+                pendingDecodesRef.current = Math.max(0, pendingDecodesRef.current - 1);
                 if (!isTtsPlayingRef.current) playNextTtsChunk();
               },
             );
@@ -730,6 +816,7 @@ export function VoiceAgentConsole() {
           }
 
           if (payload.type === "tts_done") {
+            if (!shouldProcessLlmTurnEvent(payload)) return;
             ttsAllChunksReceivedRef.current = true;
             if (!ttsAudioReceivedRef.current) {
               // TTS produced nothing (error path) — show LLM text directly.
@@ -769,7 +856,10 @@ export function VoiceAgentConsole() {
           }
 
           if (payload.type === "tts_interrupted") {
+            if (!shouldProcessLlmTurnEvent(payload)) return;
             clearTtsQueue();
+            interruptCurrentLlmTurn();
+            pendingAssistantTextRef.current = "";
             startTransition(() => { setMode("listening"); });
             return;
           }
@@ -857,6 +947,7 @@ export function VoiceAgentConsole() {
               if (bargeinFrameCountRef.current >= BARGE_IN_FRAMES) {
                 interruptSentRef.current = true;
                 clearTtsQueue();
+                interruptCurrentLlmTurn();
                 transport.send({ type: "interrupt" });
                 startTransition(() => { setMode("listening"); });
               }
@@ -925,6 +1016,7 @@ export function VoiceAgentConsole() {
               if (bargeinFrameCountRef.current >= BARGE_IN_FRAMES) {
                 interruptSentRef.current = true;
                 clearTtsQueue();
+                interruptCurrentLlmTurn();
                 if (socket.readyState === WebSocket.OPEN) {
                   socket.send(JSON.stringify({ type: "interrupt" }));
                 }
@@ -1019,6 +1111,7 @@ export function VoiceAgentConsole() {
         }
 
         if (payload.type === "llm_start") {
+          if (!shouldAcceptLlmStart(payload)) return;
           const uid = activeUserIdRef.current;
           const userText = payload.user_text?.trim();
           if (uid) {
@@ -1035,8 +1128,10 @@ export function VoiceAgentConsole() {
             const prevText = revealedTextRef.current || pendingAssistantTextRef.current;
             if (prevText) updateMsg(prevAid, { text: prevText, isStreaming: false });
           }
+          clearTtsQueue();
           activeAssistantIdRef.current = null;
           pendingAssistantTextRef.current = "";
+          revealedTextRef.current = "";
           ttsAudioReceivedRef.current = false;
           if (revealRafRef.current !== null) {
             cancelAnimationFrame(revealRafRef.current);
@@ -1049,6 +1144,7 @@ export function VoiceAgentConsole() {
         }
 
         if (payload.type === "llm_partial") {
+          if (!shouldProcessLlmTurnEvent(payload)) return;
           // Buffer the text but DON'T render yet — we want the visible text to advance
           // in lockstep with TTS audio playback, not race ahead of it.
           pendingAssistantTextRef.current = payload.text ?? "";
@@ -1057,6 +1153,7 @@ export function VoiceAgentConsole() {
         }
 
         if (payload.type === "llm_final") {
+          if (!shouldProcessLlmTurnEvent(payload)) return;
           pendingAssistantTextRef.current = payload.text ?? "";
           if (payload.llm_ms != null) setLlmLatencyMs(payload.llm_ms);
           startTransition(() => { setMode(isRecordingRef.current ? "listening" : "responding"); });
@@ -1064,6 +1161,7 @@ export function VoiceAgentConsole() {
         }
 
         if (payload.type === "llm_error") {
+          if (!shouldProcessLlmTurnEvent(payload)) return;
           const aid = activeAssistantIdRef.current;
           if (aid) updateMsg(aid, { text: typeof payload.message === "string" && payload.message ? payload.message : "AI unavailable — check your LLM provider and model.", isStreaming: false, isError: true });
           if (!isRecordingRef.current) {
@@ -1074,6 +1172,7 @@ export function VoiceAgentConsole() {
         }
 
         if (payload.type === "tts_start") {
+          if (!shouldProcessLlmTurnEvent(payload)) return;
           clearTtsQueue();
           pendingDecodesRef.current = 0;
           ttsAudioReceivedRef.current = false;
@@ -1082,6 +1181,7 @@ export function VoiceAgentConsole() {
         }
 
         if (payload.type === "tts_audio") {
+          if (!shouldProcessLlmTurnEvent(payload)) return;
           if (payload.tts_ms != null) setTtsLatencyMs(payload.tts_ms);
           const sentenceText = payload.sentence_text ?? pendingAssistantTextRef.current;
           const binaryString = atob(payload.data ?? "");
@@ -1090,17 +1190,31 @@ export function VoiceAgentConsole() {
           const audioCtx = audioContextRef.current ?? new AudioContext();
           if (!audioContextRef.current) audioContextRef.current = audioCtx;
           ttsAudioReceivedRef.current = true;
+          const decodeGeneration = ttsGenerationRef.current;
+          const decodeAssistantId = activeAssistantIdRef.current;
           pendingDecodesRef.current++;
           void audioCtx.decodeAudioData(
             bytes.buffer.slice(0),
             (buffer) => {
-              pendingDecodesRef.current--;
-              ttsQueueRef.current.push({ buffer, text: sentenceText });
+              pendingDecodesRef.current = Math.max(0, pendingDecodesRef.current - 1);
+              if (
+                ttsGenerationRef.current !== decodeGeneration ||
+                activeAssistantIdRef.current !== decodeAssistantId ||
+                !shouldProcessLlmTurnEvent(payload)
+              ) {
+                return;
+              }
+              ttsQueueRef.current.push({
+                buffer,
+                text: sentenceText,
+                generation: decodeGeneration,
+                assistantId: decodeAssistantId,
+              });
               if (!isTtsPlayingRef.current) playNextTtsChunk();
             },
             () => {
               // Decode failed — drop the chunk but unblock the finalization counter.
-              pendingDecodesRef.current--;
+              pendingDecodesRef.current = Math.max(0, pendingDecodesRef.current - 1);
               if (!isTtsPlayingRef.current) playNextTtsChunk();
             },
           );
@@ -1108,6 +1222,7 @@ export function VoiceAgentConsole() {
         }
 
         if (payload.type === "tts_done") {
+          if (!shouldProcessLlmTurnEvent(payload)) return;
           ttsAllChunksReceivedRef.current = true;
           if (!ttsAudioReceivedRef.current) {
             const aid = activeAssistantIdRef.current;
@@ -1138,7 +1253,10 @@ export function VoiceAgentConsole() {
         }
 
         if (payload.type === "tts_interrupted") {
+          if (!shouldProcessLlmTurnEvent(payload)) return;
           clearTtsQueue();
+          interruptCurrentLlmTurn();
+          pendingAssistantTextRef.current = "";
           startTransition(() => { setMode("listening"); });
           return;
         }
@@ -1216,6 +1334,7 @@ export function VoiceAgentConsole() {
 
   const stopStreaming = () => {
     startAttemptRef.current += 1;
+    interruptCurrentLlmTurn();
     const wasConnecting = isConnecting;
     setIsConnecting(false);
     setIsRecording(false);
