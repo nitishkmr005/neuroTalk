@@ -11,16 +11,19 @@ A fully local, real-time voice agent with selectable `WebRTC` and `WebSocket` tr
 NeuroTalk is a conversational voice agent that runs the full speech-to-speech pipeline locally:
 
 ```
-Microphone → STT (Whisper) → LLM (Ollama) → TTS (Kokoro/Chatterbox) → Speaker
+Microphone → Denoise → STT (Whisper) → LLM (Ollama / llama-cpp) → TTS (Kokoro/Chatterbox) → Speaker
 ```
 
-Audio streams over a single WebSocket. The backend transcribes speech incrementally, starts the LLM call before you finish speaking, and begins synthesizing audio as soon as the first sentence is ready — so the agent starts talking in parallel with its own thinking rather than waiting for a complete response.
+Audio streams over WebRTC (or WebSocket). The backend transcribes speech incrementally, applies deep neural noise suppression before the STT model sees the signal, uses a semantic **Smart Turn** gate to decide when you have actually finished your thought, then starts the LLM call and begins synthesizing audio as soon as the first sentence is ready — so the agent starts talking in parallel with its own thinking rather than waiting for a complete response.
 
 ## Key Features
 
 - **Fully local** — STT, LLM, and TTS all run on your hardware; nothing leaves your machine
 - **Low-latency streaming** — partial transcripts appear live as you speak; TTS playback starts mid-generation
 - **Interrupt support** — speak over the agent at any time to cancel and start a new turn
+- **Smart Turn turn-taking** — semantic utterance-completion model prevents premature replies on mid-sentence pauses
+- **DeepFilterNet3 denoising** — server-side deep neural noise suppression applied before Whisper for cleaner transcripts
+- **Hallucination filtering** — `log_prob_threshold` discards low-confidence Whisper segments before they reach the LLM
 - **Swappable models** — change STT size, LLM, or TTS engine with a single env var
 - **Learnable codebase** — each pipeline stage has a standalone script you can run independently
 
@@ -39,10 +42,12 @@ Because text streaming and voice streaming are synchronized, TTS starts speaking
 | Backend | FastAPI · Python 3.11+ · uv |
 | Transport (audio in) | **WebRTC / RTP** (Opus codec, `aiortc` + `PyAV`) · WebSocket PCM streaming |
 | Transport (agent out) | **RTCDataChannel** (ordered JSON) · WebSocket JSON |
-| STT | faster-whisper (`small`, int8, CPU) — via CTranslate2 |
-| LLM | Ollama (local) — `llama3.2:3b` (default) |
+| Denoise | **DeepFilterNet3** (server-side, deep neural noise suppression before STT) |
+| STT | faster-whisper (`small.en`, int8, CPU) — via CTranslate2 |
+| Turn-taking | **Smart Turn v3.2** (Whisper-based ONNX semantic completion gate) |
+| VAD | `Silero VAD` for streaming endpointing/barge-in · RMS fallback when disabled |
+| LLM | Ollama (local) or llama-cpp (GGUF) — `llama3.2:3b` (default) |
 | TTS | Kokoro 82M MLX (default) · Chatterbox Turbo · Qwen · VibeVoice |
-| Server-side VAD | `Silero VAD` for streaming endpointing/barge-in · RMS fallback when disabled |
 | ICE / NAT traversal | STUN (`stun.l.google.com:19302`) · Vanilla ICE (full gather before offer) |
 | Config | Pydantic Settings + `.env` |
 | Logging | Loguru — colorful terminal + rotating JSON files |
@@ -81,33 +86,84 @@ NeuroTalk supports two transport modes selectable in the UI:
 **WebRTC** (default) sends Opus-compressed audio over UDP with browser-native echo cancellation, noise suppression, and auto-gain — use this unless UDP is blocked by a firewall.
 **WebSocket** sends raw PCM over TCP with no echo cancellation and higher bandwidth; switch to it if WebRTC fails to connect.
 
+## Pipeline overview
+
+```
+Browser mic
+  │  AEC + NS + AGC (browser-native)
+  │  Opus → RTP → UDP
+  ▼
+Server
+  │  Opus decode → PCM 16 kHz
+  ├─ Silero VAD  (speech_start → barge-in; speech_end → turn gate)
+  │
+  │  DeepFilterNet3 denoise
+  │  faster-whisper STT  (log_prob_threshold -0.7)
+  │  Smart Turn v3.2     (semantic completeness check)
+  │
+  ▼
+  LLM (sentence streaming)
+  TTS (per sentence, async)
+  RTCDataChannel → browser playback
+```
+
 ## Environment Variables
 
 Copy `backend/.env.example` → `backend/.env` and adjust as needed.
 
+### Core settings
+
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `STT_MODEL_SIZE` | `small` | Whisper model (`tiny.en` → `large-v3`) |
+| `STT_MODEL_SIZE` | `small.en` | Whisper model (`tiny.en` → `large-v3`) |
 | `STT_DEVICE` | `cpu` | `cpu` or `cuda` |
 | `OLLAMA_HOST` | `http://localhost:11434` | Ollama server URL |
 | `LLM_MODEL` | `llama3.2:3b` | Any model pulled via `ollama pull` |
-| `LLM_MAX_TOKENS` | `100` | Max tokens per LLM response |
 | `LLM_MAX_HISTORY_TURNS` | `6` | Conversation turns kept in context |
 | `TTS_BACKEND` | `kokoro` | TTS engine — see below |
-| `STREAM_EMIT_INTERVAL_MS` | `250` | Minimum gap between partial STT emits |
-| `STREAM_MIN_AUDIO_MS` | `300` | Minimum buffered audio before STT runs |
+| `WELCOME_MESSAGE` | `Hello! I'm your Neurotalk voice assistant...` | Spoken greeting on session start; empty disables it |
+
+### Denoise (DeepFilterNet3)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DENOISE_ENABLED` | `true` | Apply DeepFilterNet3 before STT. Set `false` to skip (faster, noisier) |
+
+> **Setup:** `uv sync --group deepfilter && python scripts/download_deepfilter_model.py`
+
+### Streaming / debounce
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `STREAM_EMIT_INTERVAL_MS` | `700` | Minimum gap between partial STT emits |
+| `STREAM_MIN_AUDIO_MS` | `500` | Minimum buffered audio before STT runs |
 | `STREAM_LLM_MIN_CHARS` | `8` | Minimum transcript length before starting the LLM |
-| `STREAM_LLM_SILENCE_MS` | `950` | Debounce fallback when VAD end does not fire cleanly |
+| `STREAM_LLM_SILENCE_MS` | `500` | Silence debounce fallback when VAD end does not fire cleanly |
+
+### VAD (Silero)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
 | `STREAM_VAD_ENABLED` | `true` | Enable dedicated streaming voice activity detection |
-| `STREAM_VAD_THRESHOLD` | `0.4` | Speech probability threshold for VAD start detection |
-| `STREAM_VAD_MIN_SILENCE_MS` | `600` | Required silence before VAD emits speech end |
-| `STREAM_VAD_SPEECH_PAD_MS` | `200` | Extra speech padding kept around VAD boundaries |
+| `STREAM_VAD_THRESHOLD` | `0.6` | Speech probability threshold for VAD start detection |
+| `STREAM_VAD_MIN_SILENCE_MS` | `500` | Required silence before VAD emits speech end |
+| `STREAM_VAD_SPEECH_PAD_MS` | `250` | Extra speech padding kept around VAD boundaries |
 | `STREAM_VAD_FRAME_SAMPLES` | `512` | Frame size fed into the streaming VAD at 16 kHz |
-| `WELCOME_MESSAGE` | `Hello! I'm your Neurotalk voice assistant...` | Spoken greeting streamed on session start; empty disables it |
+
+### Smart Turn (semantic turn-taking)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `STREAM_SMART_TURN_ENABLED` | `true` | Enable semantic turn-completion gating after VAD silence |
+| `STREAM_SMART_TURN_THRESHOLD` | `0.65` | Completion probability threshold (0–1) |
+| `STREAM_SMART_TURN_MAX_BUDGET_MS` | `600` | Max extra wait while polling for completion |
+| `STREAM_SMART_TURN_INCOMPLETE_WAIT_MS` | `1500` | Extra grace period when Smart Turn says "not complete yet" |
+
+> **Setup:** `uv sync --group smart_turn && python scripts/download_smart_turn_model.py`
 
 ## Switching LLM Models
 
-NeuroTalk uses Ollama for local LLM inference. Switching models is one line.
+NeuroTalk uses Ollama (or llama-cpp) for local LLM inference. Switching models is one line.
 
 **Available models (fast → quality):**
 
@@ -204,19 +260,26 @@ neuroTalk/
 ├── backend/              # FastAPI backend
 │   ├── app/
 │   │   ├── main.py       # WebSocket route + app startup/warmup
-│   │   ├── webrtc/       # WebRTC transport (NEW)
+│   │   ├── webrtc/       # WebRTC transport
 │   │   │   ├── router.py     # POST /webrtc/offer, DELETE /webrtc/session/{id}
 │   │   │   └── session.py    # RTCPeerConnection, RTP consumer, VAD, STT→LLM→TTS
-│   │   ├── services/     # STT, LLM, TTS, VAD service modules
+│   │   ├── services/     # STT, LLM, TTS, VAD, Denoise, SmartTurn modules
+│   │   │   ├── stt.py        # faster-whisper wrapper
+│   │   │   ├── llm.py        # multi-provider LLM streaming
+│   │   │   ├── tts.py        # Kokoro / Chatterbox / Qwen / VibeVoice
+│   │   │   ├── vad.py        # Silero VAD streaming
+│   │   │   ├── denoise.py    # DeepFilterNet3 noise suppression
+│   │   │   └── smart_turn.py # ONNX semantic turn-completion detector
 │   │   ├── prompts/      # System prompts
 │   │   ├── utils/        # Shared utilities (emotion tag cleaning, etc.)
 │   │   └── models.py     # Pydantic response models
 │   ├── config/           # Settings + logging
+│   ├── scripts/          # Model download helpers
 │   └── logs/             # JSON log files (latest 5 kept)
 ├── frontend/             # Next.js app
 │   └── components/
 │       ├── voice-agent-console.tsx   # Main UI — WebRTC + WS mode toggle
-│       └── webrtc-transport.ts       # RTCPeerConnection + RTCDataChannel client (NEW)
+│       └── webrtc-transport.ts       # RTCPeerConnection + RTCDataChannel client
 ├── scripts/              # Standalone learnable Python demos
 │   ├── stt.py            # STT only
 │   ├── llm_call.py       # LLM only
@@ -256,3 +319,7 @@ uv run --project backend python scripts/agent.py path/to/audio.wav
 | `make check` | Lint + type check |
 | `make tts-envs` | Install isolated venvs for all TTS models |
 | `make tts-report` | Run all TTS models and save comparison report to `scripts/speech/` |
+
+## Deep-dive
+
+For a step-by-step technical explanation of every stage — WebRTC, VAD, DeepFilterNet3, Smart Turn, STT, LLM, TTS, and interrupt handling — see [`docs/blog.md`](docs/blog.md).
