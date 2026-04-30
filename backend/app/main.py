@@ -354,6 +354,7 @@ async def transcribe_stream(websocket: WebSocket) -> None:
     active_tts_task: asyncio.Task[None] | None = None
     pending_llm_call: tuple[str, str] | None = None
     latest_llm_input = ""
+    llm_seq = 0
     interrupt_event = asyncio.Event()
     silence_debounce_task: asyncio.Task[None] | None = None
     conversation_history: list[dict[str, str]] = []
@@ -389,7 +390,7 @@ async def transcribe_stream(websocket: WebSocket) -> None:
             except (RuntimeError, WebSocketDisconnect):
                 pass
 
-    async def _tts_sentence_pipeline(queue: asyncio.Queue[str | None]) -> None:
+    async def _tts_sentence_pipeline(active_llm_seq: int, queue: asyncio.Queue[str | None]) -> None:
         """Consume sentences from *queue* and synthesise + stream each one immediately.
 
         Runs concurrently with the LLM token loop so speech starts after the
@@ -417,11 +418,12 @@ async def transcribe_stream(websocket: WebSocket) -> None:
             if not tts_started:
                 tts_started = True
                 tts_t0 = perf_counter()
-                await send_json({"type": "tts_start"})
+                await send_json({"type": "tts_start", "llm_seq": active_llm_seq})
             tts_ms = round((perf_counter() - tts_t0) * 1000, 2)
             wav_b64 = base64.b64encode(wav_bytes).decode()
             await send_json({
                 "type": "tts_audio",
+                "llm_seq": active_llm_seq,
                 "data": wav_b64,
                 "sample_rate": sr,
                 "tts_ms": tts_ms,
@@ -429,11 +431,11 @@ async def transcribe_stream(websocket: WebSocket) -> None:
             })
 
         if interrupt_event.is_set():
-            await send_json({"type": "tts_interrupted"})
+            await send_json({"type": "tts_interrupted", "llm_seq": active_llm_seq})
         else:
-            await send_json({"type": "tts_done"})
+            await send_json({"type": "tts_done", "llm_seq": active_llm_seq})
 
-    async def run_llm_stream(text: str, trigger: str) -> None:
+    async def run_llm_stream(active_llm_seq: int, text: str, trigger: str) -> None:
         """Run a single LLM inference turn and stream TTS audio sentence-by-sentence.
 
         Clears the audio buffer (the utterance is now captured), resets the
@@ -448,7 +450,7 @@ async def transcribe_stream(websocket: WebSocket) -> None:
             trigger: Source that triggered this call (``"final"`` or
                      ``"debounced_partial"``), recorded in the session log.
         """
-        nonlocal llm_task, active_tts_task, pending_llm_call, latest_llm_input, last_text_sent, chunk_count, last_emit_at, llm_responded
+        nonlocal llm_task, active_tts_task, pending_llm_call, latest_llm_input, last_text_sent, chunk_count, last_emit_at, llm_responded, llm_seq
         llm_responded = False
         pcm_buffer.clear()
         last_text_sent = ""
@@ -464,16 +466,16 @@ async def transcribe_stream(websocket: WebSocket) -> None:
         latest_llm_input = text
 
         sent_queue: asyncio.Queue[str | None] = asyncio.Queue()
-        tts_task = asyncio.create_task(_tts_sentence_pipeline(sent_queue))
+        tts_task = asyncio.create_task(_tts_sentence_pipeline(active_llm_seq, sent_queue))
         active_tts_task = tts_task
 
         try:
-            await send_json({"type": "llm_start", "user_text": text})
+            await send_json({"type": "llm_start", "llm_seq": active_llm_seq, "user_text": text})
             async for token in stream_llm_response(text, conversation_history=list(conversation_history)):
                 if interrupt_event.is_set():
                     break
                 full_response += token
-                await send_json({"type": "llm_partial", "text": strip_emotion_tags(full_response)})
+                await send_json({"type": "llm_partial", "llm_seq": active_llm_seq, "text": strip_emotion_tags(full_response)})
                 tail = full_response[processed_chars:]
                 while True:
                     m = _SENT_BOUNDARY.search(tail)
@@ -489,14 +491,18 @@ async def transcribe_stream(websocket: WebSocket) -> None:
             llm_ms = round((perf_counter() - llm_t0) * 1000, 2)
             logger.info("request_id={} event=llm_done llm_ms={}", request_id, llm_ms)
             display_text = strip_emotion_tags(full_response)
-            await send_json({"type": "llm_final", "text": display_text, "llm_ms": llm_ms})
+            await send_json({"type": "llm_final", "llm_seq": active_llm_seq, "text": display_text, "llm_ms": llm_ms})
 
         except Exception as llm_err:
             llm_ms = round((perf_counter() - llm_t0) * 1000, 2)
             call_error = str(llm_err)
             logger.warning("request_id={} event=llm_error error={}", request_id, llm_err)
             with suppress(Exception):
-                await send_json({"type": "llm_error", "message": "LLM unavailable — check your LLM provider and model."})
+                await send_json({
+                    "type": "llm_error",
+                    "llm_seq": active_llm_seq,
+                    "message": "LLM unavailable — check your LLM provider and model.",
+                })
 
         finally:
             if not interrupt_event.is_set() and call_error is None:
@@ -553,7 +559,8 @@ async def transcribe_stream(websocket: WebSocket) -> None:
             llm_task = None
             return
 
-        llm_task = asyncio.create_task(run_llm_stream(next_text, next_trigger))
+        llm_seq += 1
+        llm_task = asyncio.create_task(run_llm_stream(llm_seq, next_text, next_trigger))
 
     def schedule_llm_stream(text: str, trigger: str) -> None:
         """Gate and enqueue an LLM call, cancelling any stale in-flight call.
@@ -567,7 +574,7 @@ async def transcribe_stream(websocket: WebSocket) -> None:
             trigger: Source label (``"final"`` or ``"debounced_partial"``),
                      forwarded to the session log.
         """
-        nonlocal llm_task, pending_llm_call
+        nonlocal llm_task, pending_llm_call, llm_seq
         normalized_text = text.strip()
         if len(normalized_text) < settings.stream_llm_min_chars:
             return
@@ -590,7 +597,8 @@ async def transcribe_stream(websocket: WebSocket) -> None:
         if llm_task is None or llm_task.done():
             next_text, next_trigger = pending_llm_call
             pending_llm_call = None
-            llm_task = asyncio.create_task(run_llm_stream(next_text, next_trigger))
+            llm_seq += 1
+            llm_task = asyncio.create_task(run_llm_stream(llm_seq, next_text, next_trigger))
 
     async def _silence_debounce_then_fire(text: str, trigger: str) -> None:
         """Wait for the configured silence window, then schedule an LLM call.
@@ -646,7 +654,7 @@ async def transcribe_stream(websocket: WebSocket) -> None:
                 sent_queue.put_nowait(sentence)
         sent_queue.put_nowait(None)
 
-        await _tts_sentence_pipeline(sent_queue)
+        await _tts_sentence_pipeline(0, sent_queue)
 
     await send_json({"type": "ready", "request_id": request_id})
     asyncio.create_task(run_welcome())

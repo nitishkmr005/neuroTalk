@@ -83,6 +83,7 @@ class WebRTCSession:
         self._tts_task: asyncio.Task | None = None
         self._pending_llm_call: str | None = None
         self._latest_llm_input = ""
+        self._llm_seq = 0
         self._interrupt_event = asyncio.Event()
         self._silence_debounce_task: asyncio.Task | None = None
         self._speech_finalization_task: asyncio.Task | None = None
@@ -534,10 +535,14 @@ class WebRTCSession:
         # _run_llm clears interrupt_event.
         if self._tts_task and not self._tts_task.done():
             self._tts_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._tts_task
             self._tts_task = None
 
         if self._llm_task and not self._llm_task.done():
             self._llm_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._llm_task
             self._llm_task = None
 
     # ── LLM scheduling ───────────────────────────────────────────────────────
@@ -631,11 +636,14 @@ class WebRTCSession:
         if self._llm_task is None or self._llm_task.done():
             next_text = self._pending_llm_call
             self._pending_llm_call = None
-            self._llm_task = asyncio.create_task(self._run_llm(next_text))
+            self._llm_seq += 1
+            self._llm_task = asyncio.create_task(self._run_llm(self._llm_seq, next_text))
 
     # ── LLM + TTS pipeline ───────────────────────────────────────────────────
 
-    async def _tts_sentence_pipeline(self, queue: asyncio.Queue, enable_barge_in: bool = True) -> None:
+    async def _tts_sentence_pipeline(
+        self, llm_seq: int, queue: asyncio.Queue, enable_barge_in: bool = True
+    ) -> None:
         """Consume sentences from *queue* and synthesise + stream each one immediately.
 
         Runs concurrently with ``_run_llm`` so the agent starts speaking after
@@ -671,11 +679,12 @@ class WebRTCSession:
             if not tts_started:
                 tts_started = True
                 tts_t0 = perf_counter()
-                await self._send_json({"type": "tts_start"})
+                await self._send_json({"type": "tts_start", "llm_seq": llm_seq})
             tts_ms = round((perf_counter() - tts_t0) * 1000, 2)
             wav_b64 = base64.b64encode(wav_bytes).decode()
             await self._send_json({
                 "type": "tts_audio",
+                "llm_seq": llm_seq,
                 "data": wav_b64,
                 "sample_rate": sr,
                 "tts_ms": tts_ms,
@@ -684,11 +693,11 @@ class WebRTCSession:
 
         self._is_agent_speaking = False
         if self._interrupt_event.is_set():
-            await self._send_json({"type": "tts_interrupted"})
+            await self._send_json({"type": "tts_interrupted", "llm_seq": llm_seq})
         else:
-            await self._send_json({"type": "tts_done"})
+            await self._send_json({"type": "tts_done", "llm_seq": llm_seq})
 
-    async def _run_llm(self, text: str) -> None:
+    async def _run_llm(self, llm_seq: int, text: str) -> None:
         """Run one full LLM inference turn and stream TTS audio sentence-by-sentence.
 
         Clears the interrupt flag, streams tokens from the LLM, extracts sentence
@@ -708,11 +717,11 @@ class WebRTCSession:
         call_error: str | None = None
 
         sent_queue: asyncio.Queue[str | None] = asyncio.Queue()
-        tts_task = asyncio.create_task(self._tts_sentence_pipeline(sent_queue))
+        tts_task = asyncio.create_task(self._tts_sentence_pipeline(llm_seq, sent_queue))
         self._tts_task = tts_task
 
         try:
-            await self._send_json({"type": "llm_start", "user_text": text})
+            await self._send_json({"type": "llm_start", "llm_seq": llm_seq, "user_text": text})
             async for token in stream_llm_response(
                 text, conversation_history=list(self._conversation_history)
             ):
@@ -720,7 +729,7 @@ class WebRTCSession:
                     break
                 full_response += token
                 await self._send_json(
-                    {"type": "llm_partial", "text": strip_emotion_tags(full_response)}
+                    {"type": "llm_partial", "llm_seq": llm_seq, "text": strip_emotion_tags(full_response)}
                 )
                 # Extract complete sentences and enqueue for immediate TTS.
                 tail = full_response[processed_chars:]
@@ -737,7 +746,7 @@ class WebRTCSession:
             llm_ms = round((perf_counter() - llm_t0) * 1000, 2)
             display_text = strip_emotion_tags(full_response)
             await self._send_json(
-                {"type": "llm_final", "text": display_text, "llm_ms": llm_ms}
+                {"type": "llm_final", "llm_seq": llm_seq, "text": display_text, "llm_ms": llm_ms}
             )
         except Exception as err:
             call_error = str(err)
@@ -745,7 +754,11 @@ class WebRTCSession:
                 "session_id={} event=llm_error error={}", self.session_id, err
             )
             await self._send_json(
-                {"type": "llm_error", "message": "LLM unavailable — check your LLM provider and model."}
+                {
+                    "type": "llm_error",
+                    "llm_seq": llm_seq,
+                    "message": "LLM unavailable — check your LLM provider and model.",
+                }
             )
         finally:
             if not self._interrupt_event.is_set() and call_error is None:
@@ -783,7 +796,8 @@ class WebRTCSession:
             next_text = self._pending_llm_call
             self._pending_llm_call = None
             if next_text != self._latest_llm_input:
-                self._llm_task = asyncio.create_task(self._run_llm(next_text))
+                self._llm_seq += 1
+                self._llm_task = asyncio.create_task(self._run_llm(self._llm_seq, next_text))
                 return
         self._llm_task = None
 
@@ -811,7 +825,7 @@ class WebRTCSession:
                 sent_queue.put_nowait(sentence)
         sent_queue.put_nowait(None)
 
-        await self._tts_sentence_pipeline(sent_queue, enable_barge_in=False)
+        await self._tts_sentence_pipeline(0, sent_queue, enable_barge_in=False)
 
     # ── Helpers ──────────────────────────────────────────────────────────────
 
