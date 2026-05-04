@@ -12,16 +12,6 @@ class Settings(BaseSettings):
 
     # ─────────────────────────────────────────────────────────────────────────
     # 1. APP — server identity, networking, and logging
-    #    Loaded first; governs how the process binds and what it emits.
-    #
-    # app_host          "0.0.0.0" listens on all interfaces (needed for Docker /
-    #                   LAN access). Use "127.0.0.1" to restrict to loopback only.
-    # app_port          Change if 8000 is taken by another process.
-    # log_level         ↑ WARNING/ERROR → silent in prod, hides useful traces.
-    #                   ↓ DEBUG         → floods every audio frame; very noisy.
-    #                   INFO is the right default.
-    # cors_origins_raw  Comma-separated browser origins allowed to connect.
-    #                   Wrong value → browser blocks every API call silently.
     # ─────────────────────────────────────────────────────────────────────────
     app_name: str = "NeuroTalk STT Backend"
     app_host: str = "0.0.0.0"
@@ -34,158 +24,233 @@ class Settings(BaseSettings):
 
     # ─────────────────────────────────────────────────────────────────────────
     # 2. DENOISE — DeepFilterNet3 noise suppression, applied before STT
-    #    First stage in the audio pipeline; cleans the signal Whisper sees.
-    #
-    # denoise_enabled   When False (or deepfilternet not installed) audio goes
-    #                   to Whisper unmodified — faster but noisier transcripts.
-    # denoise_model_dir Local directory with DeepFilterNet3 weights.
-    #                   Run scripts/download_deepfilter_model.py to populate.
     # ─────────────────────────────────────────────────────────────────────────
     denoise_enabled: bool = True
     denoise_model_dir: Path = Path("models/deepfilter")
 
     # ─────────────────────────────────────────────────────────────────────────
     # 3. STT — faster-whisper speech-to-text
-    #    Runs on denoised audio and produces the transcript.
-    #
-    # stt_model_size    tiny.en | base.en | small.en | medium.en | large-v3.
-    #                   ↑ larger → more accurate, slower first-word latency.
-    #                   ↓ smaller → near-instant, but misses mumbled words.
-    # stt_device        cpu | cuda | mps. MPS = Apple Silicon GPU.
-    # stt_compute_type  int8 (fast CPU) | float16 (GPU) | float32 (slow CPU).
-    # stt_beam_size     ↑ high (3–5) → more accurate beam search, slower.
-    #                   ↓ 1          → greedy decode, fastest possible.
-    # stt_vad_filter    Drops silent frames before Whisper sees them.
-    #                   ↑ True  → large speed win, may drop very faint speech.
-    #                   ↓ False → Whisper processes every frame; slower.
-    # stt_language      Force language (e.g. "en"). Empty = auto-detect.
-    #                   ↑ forced → skips language-detect overhead, more stable.
-    #                   ↓ auto   → slight latency penalty per chunk.
     # ─────────────────────────────────────────────────────────────────────────
     stt_model_size: str = "small.en"
     stt_device: str = "cpu"
     stt_compute_type: str = "int8"
+
+    # Analogy: Wider search vs. fastest path
+    # beam_size=1 is like asking Google Maps for ONE route and taking it immediately.
+    # beam_size=5 is like asking for 5 routes, comparing them, then picking the best.
+    # For voice chat where speed matters more than perfection, beam_size=1 is ideal.
+    #
+    # beam_size=1 (greedy):  "Hello" → done in 120ms
+    # beam_size=5 (careful): "Hello" → 5 candidates compared → done in 400ms
     stt_beam_size: int = 1
+
     stt_vad_filter: bool = True
     stt_language: str = "en"
 
     # ─────────────────────────────────────────────────────────────────────────
     # 4. STREAMING VAD — Silero voice-activity detector for endpointing
-    #    Runs continuously on incoming audio; signals when speech starts/stops.
-    #    Fires before the debounce logic that decides when to call the LLM.
-    #
-    # stream_vad_enabled        Master switch. False → silence-timer-only
-    #                           endpointing (less accurate).
-    # stream_vad_threshold      ↑ high (0.8+) → misses quiet/distant speech.
-    #                           ↓ low  (0.3−) → false positives on background
-    #                           noise; LLM fires mid-noise.
-    # stream_vad_min_silence_ms ↑ high → waits longer to confirm end-of-speech;
-    #                           feels sluggish but avoids cutting off sentences.
-    #                           ↓ low  → snappy but may split one utterance
-    #                           into two turns.
-    # stream_vad_speech_pad_ms  ↑ high → retains more context around edges;
-    #                           wastes bandwidth on silence.
-    #                           ↓ low  → tight crop; first/last syllables may
-    #                           be clipped.
-    # stream_vad_frame_samples  Silero frame size. 512 = 32 ms @ 16 kHz.
-    #                           ↑ larger → coarser detection, lower CPU use.
-    #                           ↓ smaller → finer, but not supported by Silero.
     # ─────────────────────────────────────────────────────────────────────────
+
     stream_vad_enabled: bool = True
+
+    # Analogy: The nightclub bouncer
+    # The bouncer only lets people in if they look like a genuine guest (not tourists
+    # wandering by). stream_vad_threshold is the minimum "confidence of speech" score
+    # the Silero model must output before it declares "yes, someone is talking."
+    #
+    # Silero outputs a probability 0.0–1.0 for each 32ms audio frame:
+    #   Fan noise       → prob ≈ 0.05  (below 0.6 → bouncer says "not speech, ignored")
+    #   Keyboard clicks → prob ≈ 0.25  (below 0.6 → ignored)
+    #   Faint whisper   → prob ≈ 0.55  (below 0.6 → borderline; missed at this threshold)
+    #   Normal speech   → prob ≈ 0.90  (above 0.6 → bouncer says "come in, speech detected")
+    #
+    # ↑ 0.8 → misses quiet or far-away speakers (bouncer is very strict)
+    # ↓ 0.3 → fan and keyboard trigger VAD (bouncer lets everyone in)
     stream_vad_threshold: float = 0.6
+
+    # Analogy: The motion-sensor light
+    # A motion sensor light doesn't turn off the instant you stop moving. It waits
+    # for the room to be still for a set duration before switching off, so it doesn't
+    # flicker every time you pause mid-gesture.
+    # stream_vad_min_silence_ms = the "stillness window" before VAD declares end-of-speech.
+    #
+    # User: "How are you..."  [150ms pause]  "...doing today?"
+    #        ─── speech ───   ─── gap ───    ─── speech ───
+    # VAD:  [start]           still on ✓     still on ✓    (150ms < 500ms → same turn)
+    #
+    # User: "How are you doing today?"  [600ms silence]
+    #        ──────── speech ─────────  ─── silence ───
+    # VAD:  [start]                     500ms passes → [end] ✓  (600ms > 500ms → turn ends)
+    #
+    # ↑ 1000ms → waits longer; natural mid-sentence pauses don't split the turn (sluggish)
+    # ↓ 200ms  → snappy but splits "I want to... order a pizza" into two separate turns
     stream_vad_min_silence_ms: int = 500
+
+    # Analogy: The fabric safety margin
+    # When cutting a piece of cloth along a drawn line, tailors cut 5mm wider than
+    # the line to avoid accidentally clipping the edge. stream_vad_speech_pad_ms adds
+    # a buffer of audio before and after the detected speech boundary.
+    #
+    # Without padding (pad=0ms):
+    #   Detected:  [----speech----]
+    #   Actual:  [--speech--]           ← first syllable clipped, last syllable clipped
+    #
+    # With padding (pad=250ms):
+    #   Detected:  [----speech----]
+    #   Buffered: [silence|----speech----|silence]  ← includes run-up and tail
+    #
+    # ↑ 500ms → retains a full half-second of silence on each side (wastes STT compute)
+    # ↓  50ms → tight crop; first/last syllables may be clipped in Whisper
     stream_vad_speech_pad_ms: int = 250
+
+    # Silero frame size in samples at 16 kHz. 512 samples = 32ms per VAD check.
+    # Silero only supports 256, 512, or 768 — do not change without checking the model docs.
     stream_vad_frame_samples: int = 512
 
     # ─────────────────────────────────────────────────────────────────────────
     # 5. STREAMING / DEBOUNCE — controls when partials and LLM calls fire
-    #    After VAD confirms silence, these thresholds gate the LLM trigger.
-    #
-    # stream_emit_interval_ms   ↑ high → infrequent partial updates; UI feels
-    #                           laggy but less chatter over the WebSocket.
-    #                           ↓ low  → fast partials; can overwhelm slow
-    #                           clients or cause flicker.
-    # stream_min_audio_ms       ↑ high → more audio buffered before emitting;
-    #                           reduces empty/noisy results.
-    #                           ↓ low  → fast first partial, but may be blank.
-    # stream_llm_min_chars      ↑ high → LLM only fires on longer phrases;
-    #                           misses short commands ("Stop", "Yes").
-    #                           ↓ low  → fires on every noise fragment.
-    # stream_llm_silence_ms     ↑ high → more patient; avoids splitting one
-    #                           utterance into two requests.
-    #                           ↓ low  → very responsive but may cut off slow
-    #                           speakers mid-sentence.
     # ─────────────────────────────────────────────────────────────────────────
+
+    # Analogy: The sports ticker update rate
+    # A live sports ticker doesn't print a new score every millisecond — it updates
+    # every few seconds so it's readable. stream_emit_interval_ms controls how often
+    # a new partial transcript is sent to the browser while the user is still speaking.
+    #
+    # User speaks continuously for 3 seconds:
+    #   t=0ms    Audio buffering starts
+    #   t=700ms  Partial sent → browser shows: "How are you"
+    #   t=1400ms Partial sent → browser shows: "How are you doing"
+    #   t=2100ms Partial sent → browser shows: "How are you doing today"
+    #   t=2800ms Partial sent → browser shows: "How are you doing today my friend"
+    #
+    # ↑ 2000ms → UI feels frozen between updates (score board stuck)
+    # ↓  200ms → fast flicker; may overwhelm slow browser connections
     stream_emit_interval_ms: int = 700
+
+    # Analogy: The doctor's minimum observation window
+    # A doctor won't diagnose from 0.1 seconds of symptoms — they need enough signal.
+    # stream_min_audio_ms is the minimum audio that must be buffered before we even
+    # attempt a Whisper transcription. Below this, the result would just be noise or silence.
+    #
+    # Buffer at t=200ms (200ms < 500ms) → skip STT this tick, keep accumulating
+    # Buffer at t=500ms (500ms ≥ 500ms) → enough audio, run Whisper now
+    # Buffer at t=700ms (700ms ≥ 500ms) → run Whisper again (combined with interval check)
+    #
+    # ↑ 1000ms → first partial appears very late (doctor wants too much data)
+    # ↓  100ms → Whisper runs on near-empty buffers; results are blank or hallucinated
     stream_min_audio_ms: int = 500
+
+    # Analogy: The search bar minimum query length
+    # Google ignores a single letter "a" — it needs at least a few characters to
+    # return anything useful. stream_llm_min_chars prevents the LLM from being called
+    # on noise artefacts that Whisper mistakenly transcribed as a word or two.
+    #
+    # Whisper hears fan noise → transcribes as "um"  (2 chars < 8 → LLM skipped ✓)
+    # Whisper hears cough    → transcribes as "hey"  (3 chars < 8 → LLM skipped ✓)
+    # User says "Stop"       → transcribes as "Stop" (4 chars < 8 → LLM skipped ✓)
+    # User says "What time?" → transcribes as "What time?" (10 chars ≥ 8 → LLM fires ✓)
+    #
+    # ↑ 20 → misses short commands like "Yes", "Stop", "Repeat that"
+    # ↓  2 → LLM fires on every noise artefact Whisper hallucinates
     stream_llm_min_chars: int = 8
+
+    # Analogy: The elevator door
+    # An elevator door doesn't close the instant the last person steps away. It waits
+    # a fixed period. If someone runs back during that window, the timer resets. Only
+    # when the full silence window passes with no new speech does the door close (LLM fires).
+    #
+    # User speaks: "How are you..."
+    #                    ↓
+    #              [Start 500ms timer]
+    #                    ↓
+    # User keeps speaking: "...doing today?"
+    #                    ↓
+    #              [Cancel & reset timer]  ← new audio = door re-opens
+    #              [Start fresh 500ms countdown]
+    #                    ↓
+    # User stops speaking
+    #                    ↓
+    #              [500ms of silence passes — timer completes]
+    #                    ↓
+    #              ✓ Fire LLM call with full transcript
+    #
+    # ↑ 1500ms → very patient; rarely splits one thought into two but adds noticeable lag
+    # ↓  200ms → ultra-responsive but may fire mid-sentence on a natural breath pause
     stream_llm_silence_ms: int = 500
 
     # ─────────────────────────────────────────────────────────────────────────
     # 6. SMART TURN DETECTION — ONNX semantic model for intent-based endpointing
-    #    Runs after silence is detected; confirms the user finished their turn
-    #    before allowing the LLM to reply. Falls back to silence-only when
-    #    disabled or the model file is absent.
-    #    Requires: uv sync --group smart_turn
-    #              models/smart-turn-v3.2-cpu.onnx (see scripts/download_smart_turn_model.py)
-    #
-    # stream_smart_turn_enabled          Master switch.
-    # stream_smart_turn_threshold        ↑ high (0.9+) → rarely triggers; user
-    #                                    often has to wait for the full silence
-    #                                    budget before LLM fires.
-    #                                    ↓ low  (0.4−) → triggers too eagerly;
-    #                                    cuts off incomplete sentences.
-    # stream_smart_turn_base_wait_ms     ↑ high → slower polling; model gets
-    #                                    more audio before each check.
-    #                                    ↓ low  → rapid polling; wastes CPU.
-    # stream_smart_turn_max_budget_ms    ↑ high → longer extra wait beyond
-    #                                    silence timeout before giving up.
-    #                                    ↓ low  → falls back to silence-only
-    #                                    quickly; Smart Turn barely helps.
-    # stream_smart_turn_incomplete_wait_ms  Extra wait added when model
-    #                                    consistently says "not complete".
-    #                                    ↑ high → very patient; helps slow
-    #                                    deliberate speakers.
-    #                                    ↓ low  → cuts off if model keeps
-    #                                    returning incomplete.
     # ─────────────────────────────────────────────────────────────────────────
+
     stream_smart_turn_enabled: bool = True
+
+    # Analogy: The confidence threshold before placing a trade
+    # A stock trader only places a buy order when they are at least 65% confident.
+    # Below that, the signal is too weak — they wait for more information.
+    # stream_smart_turn_threshold is the minimum probability the ONNX model must
+    # output for "utterance is complete" before the LLM is allowed to fire.
+    #
+    # User says: "I want to..."           → model outputs 0.30 (below 0.65 → wait, incomplete)
+    # User says: "I want to know about Python" → model outputs 0.91 (above 0.65 → fire LLM ✓)
+    # User says: "What's the weather"    → model outputs 0.72 (above 0.65 → fire LLM ✓)
+    #
+    # ↑ 0.90 → model rarely fires; user waits for the full silence budget on most questions
+    # ↓ 0.40 → model fires too eagerly; cuts off "I want to... [pause] ...order a pizza"
     stream_smart_turn_threshold: float = 0.65
+
     stream_smart_turn_model_path: str = "models/smart_turn/smart-turn-v3.2-cpu.onnx"
+
+    # Analogy: The chef tasting the sauce
+    # A chef doesn't taste the sauce every millisecond — they stir, wait a beat,
+    # taste again. stream_smart_turn_base_wait_ms is the pause between each
+    # "is the utterance complete?" check. The model gets more audio context each wait.
+    #
+    # VAD fires "end of speech" at t=0
+    #   t=0ms    Smart Turn check 1 → "I want to..." → 0.30 (incomplete, wait)
+    #   t=200ms  Smart Turn check 2 → "I want to..." → 0.35 (still incomplete, wait)
+    #   t=400ms  Smart Turn check 3 → "I want to..." → 0.45 (still incomplete, wait)
+    #   t=600ms  Budget exhausted → fall back to silence-timer path
+    #
+    # ↑ 500ms → model only gets 1-2 chances within the budget (slow stirring, may miss the moment)
+    # ↓  50ms → rapid polling; wastes CPU on nearly identical audio frames
     stream_smart_turn_base_wait_ms: int = 200
+
+    # Analogy: The chess clock for Smart Turn
+    # A chess player has a total time budget per move. Once the clock runs out, they
+    # must play whatever move they have. stream_smart_turn_max_budget_ms is the total
+    # time Smart Turn has to make its call. If it can't decide confidently within
+    # 600ms, the silence-timer result is used anyway.
+    #
+    # Budget=600ms, base_wait=200ms → Smart Turn gets at most 3 checks:
+    #   Check 1 at t=200ms
+    #   Check 2 at t=400ms
+    #   Check 3 at t=600ms → budget exhausted, move on
+    #
+    # ↑ 2000ms → Smart Turn has 10 attempts; very thorough but adds up to 2s extra latency
+    # ↓  200ms → only 1 check; Smart Turn barely has a chance to be useful
     stream_smart_turn_max_budget_ms: int = 600
+
+    # Analogy: The teacher's extra patience window
+    # When a student raises their hand mid-thought and pauses, a good teacher doesn't
+    # immediately call on someone else — they wait a bit longer, sensing the student
+    # isn't done. stream_smart_turn_incomplete_wait_ms is the extra patience given when
+    # Smart Turn consistently says "this utterance isn't complete yet."
+    #
+    # Normal path (model says complete):
+    #   VAD end → Smart Turn check → 0.85 ≥ 0.65 → LLM fires immediately ✓
+    #
+    # Incomplete path (model says not done):
+    #   VAD end → Smart Turn checks all say < 0.65 → budget exhausted
+    #           → [extra 1500ms wait] → user may resume speaking in that window
+    #           → if VAD fires again (user resumed): debounce resets, starts over
+    #           → if still silent after 1500ms: LLM fires with what we have
+    #
+    # ↑ 3000ms → very patient; excellent for slow deliberate speakers; frustrating for fast ones
+    # ↓  300ms → barely any extra wait; same as if Smart Turn weren't enabled
     stream_smart_turn_incomplete_wait_ms: int = 1500
 
     # ─────────────────────────────────────────────────────────────────────────
     # 7. LLM — language model provider and context
-    #    Receives the confirmed transcript and generates a reply.
-    #
-    # llm_provider          ollama | openai | anthropic | gemini | llama-cpp.
-    # ollama_host           Base URL for a local Ollama server.
-    # llm_model             Model tag for Ollama/OpenAI/Anthropic/Gemini providers.
-    #                         qwen3:4b  — fast, strong tool-calling, low memory
-    #                         qwen3:8b  — higher quality, ~2x slower
-    #                         gemma3:1b — fastest, minimal memory, lower quality
-    # openai/anthropic/     API keys — read from .env; needed only for the
-    # gemini_api_key        selected provider.
-    # llm_max_history_turns ↑ high → richer multi-turn context; more tokens
-    #                       per request, higher latency.
-    #                       ↓ low  → forgets earlier context quickly; cheap
-    #                       and fast but breaks long conversations.
-    # llm_system_prompt     Injected at the top of every request.
-    # llm_llamacpp_model_path  Path to the GGUF file. Run
-    #                          scripts/download_models.py --only-llm to fetch.
-    # llm_llamacpp_n_ctx    ↑ high → handles longer conversations; uses more
-    #                       RAM/VRAM proportionally.
-    #                       ↓ low  → truncates long contexts silently.
-    # llm_llamacpp_n_batch  ↑ high → faster prompt prefill (parallel tokens);
-    #                       more peak memory during prefill.
-    #                       ↓ low  → slower prefill; negligible memory impact.
-    # llm_llamacpp_n_gpu_layers  ↑ -1 / all → fastest (full Metal/CUDA offload).
-    #                            ↓ 0         → CPU-only; much slower on large models.
-    # llm_llamacpp_flash_attn   True → lower memory, faster attention on GPU.
-    #                           False → compatible with older drivers; slightly
-    #                           slower and uses more VRAM.
     # ─────────────────────────────────────────────────────────────────────────
     llm_provider: str = "llama-cpp"
     ollama_host: str = "http://localhost:11434"
@@ -193,7 +258,27 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     anthropic_api_key: str = ""
     gemini_api_key: str = ""
+
+    # Analogy: The waiter's memory notepad
+    # A waiter writes down orders for the current table. After N tables, they flip
+    # to a fresh page and only keep the most recent notes. llm_max_history_turns
+    # controls how many back-and-forth exchanges the LLM can "see" when answering.
+    #
+    # Turn 1: User: "What is Python?"         Assistant: "Python is a language..."
+    # Turn 2: User: "Give me an example."      Assistant: "Here's a hello world..."
+    # Turn 3: User: "What about loops?"        Assistant: "In Python, you use for..."
+    # ...
+    # Turn 7: User: "Go back to your first answer"
+    #         → With max_history_turns=6: LLM sees turns 2–7 but NOT turn 1 (forgotten)
+    #         → With max_history_turns=10: LLM still has turn 1 in context ✓
+    #
+    # Each "turn" = 1 user message + 1 assistant reply = 2 entries in the list.
+    # max_history_turns=6 keeps 12 messages in context (6 user + 6 assistant).
+    #
+    # ↑ 20 → rich long-term memory; each request sends more tokens → higher latency
+    # ↓  2 → model forgets context after 2 exchanges; feels like talking to a goldfish
     llm_max_history_turns: int = 6
+
     llm_system_prompt: str = VOICE_AGENT_PROMPT
     llm_llamacpp_model_path: Path = Path("models/llm/Llama-3.2-3B-Instruct-Q4_K_M.gguf")
     llm_llamacpp_n_ctx: int = 2000
@@ -203,17 +288,6 @@ class Settings(BaseSettings):
 
     # ─────────────────────────────────────────────────────────────────────────
     # 8. WEB SEARCH — live search tool injected into LLM context
-    #    Called as an LLM tool during the LLM inference step when enabled.
-    #    Requires: uv sync --group search.
-    #
-    # web_search_enabled      False → LLM answers from training knowledge only.
-    # web_search_max_results  ↑ high → more context for the LLM; slower fetch
-    #                         and larger prompt.
-    #                         ↓ low  → fast but may miss the best result.
-    # web_search_timeout_s    ↑ high → tolerates slow networks; stalls response
-    #                         if search is the bottleneck.
-    #                         ↓ low  → fails fast on slow links; LLM falls back
-    #                         to training knowledge.
     # ─────────────────────────────────────────────────────────────────────────
     web_search_enabled: bool = False
     web_search_max_results: int = 3
@@ -221,17 +295,6 @@ class Settings(BaseSettings):
 
     # ─────────────────────────────────────────────────────────────────────────
     # 9. TTS — text-to-speech synthesis
-    #    Last step in the pipeline; converts the LLM reply to audio.
-    #
-    # tts_backend       kokoro | chatterbox. Must match the installed uv group
-    #                   (e.g. uv sync --group kokoro_model).
-    # tts_kokoro_voice  Default Kokoro voice. GET /tts/voices lists all.
-    #                   Overridden per-session via the tts_voice WebSocket msg.
-    # tts_kokoro_speed  ↑ high (1.5–2.0) → faster speech; harder to follow for
-    #                   non-native speakers.
-    #                   ↓ low  (0.5–0.8) → slower, clearer; may feel unnatural.
-    #                   Overridden per-session via the tts_speed WebSocket msg.
-    # welcome_message   Spoken greeting on session start. Set "" to disable.
     # ─────────────────────────────────────────────────────────────────────────
     tts_backend: str = "kokoro"
     tts_kokoro_voice: str = "af_heart"
@@ -240,16 +303,6 @@ class Settings(BaseSettings):
 
     # ─────────────────────────────────────────────────────────────────────────
     # 10. MODEL DIRECTORIES — all models loaded from local disk at startup
-    #
-    # stt_model_dir                  CTranslate2 Whisper model (config.json +
-    #                                model.bin). Passed directly to WhisperModel.
-    # vad_model_path                 Silero VAD TorchScript model (.jit).
-    # tts_kokoro_model_dir           Kokoro MLX model dir (config.json +
-    #                                kokoro-v1_0.safetensors + voices/).
-    # tts_chatterbox_model_dir       Local Chatterbox model cache dir. If present,
-    #                                loaded offline; otherwise downloads from HF.
-    # stream_smart_turn_extractor_dir  Whisper feature extractor weights for
-    #                                  Smart Turn (only loaded when enabled).
     # ─────────────────────────────────────────────────────────────────────────
     stt_model_dir: Path = Path("models/stt")
     vad_model_path: Path = Path("models/vad/silero_vad.jit")
@@ -259,9 +312,6 @@ class Settings(BaseSettings):
 
     # ─────────────────────────────────────────────────────────────────────────
     # 11. STORAGE — local filesystem paths
-    #
-    # temp_dir  Scratch directory for temporary audio files. Created on startup
-    #           if absent. Safe to wipe between runs.
     # ─────────────────────────────────────────────────────────────────────────
     temp_dir: Path = Path(".cache/audio")
 

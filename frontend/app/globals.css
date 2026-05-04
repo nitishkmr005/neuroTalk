@@ -212,6 +212,12 @@ button {
   cursor: pointer;
 }
 
+:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 3px;
+  border-radius: 4px;
+}
+
 /* ─── Shell ─────────────────────────────────────────────── */
 
 .console-shell {
@@ -411,7 +417,7 @@ button {
 }
 
 .hero-copy h2 {
-  font-size: clamp(1.5rem, 1.95vw, 2.2rem);
+  font-size: clamp(1.5rem, 2.2vw, 2.8rem);
   line-height: 1.15;
   letter-spacing: -0.03em;
   color: var(--text);
@@ -426,7 +432,7 @@ button {
 .hero-summary {
   padding-left: 14px;
   border-left: 2px solid var(--border);
-  transition: border-color 400ms ease;
+  transition: border-left-color 400ms ease;
 }
 
 .hero-visual {
@@ -896,7 +902,12 @@ button {
   color: var(--text);
   letter-spacing: -0.02em;
   font-variant-numeric: tabular-nums;
+  transition: color 400ms ease;
 }
+
+.metric-good { color: var(--green) !important; }
+.metric-warn  { color: var(--amber) !important; }
+.metric-slow  { color: var(--red)   !important; }
 
 /* ─── Telemetry Meter ────────────────────────────────────── */
 
@@ -1004,13 +1015,30 @@ button {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 8px;
+  gap: 10px;
   flex: 1;
   min-height: 0;
-  color: var(--text-3);
-  font-size: 0.85rem;
-  font-style: italic;
   text-align: center;
+  opacity: 0.75;
+}
+
+.chat-empty svg {
+  opacity: 0.5;
+  color: var(--text-3);
+}
+
+.chat-empty p {
+  font-size: 0.9rem;
+  font-weight: 500;
+  color: var(--text-2);
+  font-style: normal;
+  margin: 0;
+}
+
+.chat-empty span {
+  font-size: 0.78rem;
+  font-style: italic;
+  color: var(--text-3);
 }
 
 /* ── message row ── */
@@ -1106,7 +1134,7 @@ button {
 }
 
 .chat-text {
-  font-family: var(--font-lora), "Lora", "Georgia", serif;
+  font-family: var(--font-sans), "Figtree", "Segoe UI", sans-serif;
   font-size: clamp(0.94rem, 1.18vw, 1.05rem);
   font-weight: 400;
   line-height: 1.72;
@@ -1279,6 +1307,13 @@ button {
   border-color: rgba(26, 71, 200, 0.5);
   border-left-color: var(--blue);
 }
+
+/* Mode-reactive hero border */
+.hero-panel[data-mode="listening"]  .hero-summary { border-left-color: var(--green); }
+.hero-panel[data-mode="thinking"]   .hero-summary { border-left-color: var(--blue);  }
+.hero-panel[data-mode="responding"] .hero-summary { border-left-color: var(--amber); }
+.hero-panel[data-mode="speaking"]   .hero-summary { border-left-color: var(--amber); }
+
 
 /* ─── Animations ─────────────────────────────────────────── */
 
@@ -1712,5 +1747,29 @@ button {
 
   .topbar h1 {
     font-size: 2rem;
+  }
+}
+
+/* ─── Reduced Motion ─────────────────────────────────────── */
+
+@media (prefers-reduced-motion: reduce) {
+  .orb-ring,
+  .orb-scanline,
+  .orb-center,
+  .wave-bar,
+  .mode-chip-dot,
+  .status-pill.is-live::before,
+  .mini-dot,
+  .control-status-dot.is-recording,
+  .control-status-dot.is-finalizing {
+    animation: none;
+  }
+
+  .chat-bubble--assistant.is-streaming {
+    animation: chat-enter 250ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+
+  .console-frame {
+    animation: none;
   }
 }
