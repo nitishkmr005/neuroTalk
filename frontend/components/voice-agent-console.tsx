@@ -94,7 +94,6 @@ const modeConfig: Record<
 
 const waveformHeights = [28, 46, 32, 64, 24, 58, 38, 72, 44, 30, 66, 35, 54, 26, 60, 40];
 const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8000";
-const websocketUrl = `${backendUrl.replace(/^http/, "ws")}/ws/transcribe`;
 const initialWaveLevels = waveformHeights.map(() => 0.18);
 const BARGE_IN_THRESHOLD = 0.15;
 const BARGE_IN_FRAMES = 2;
@@ -157,11 +156,8 @@ function latencyClass(ms: number | null | undefined, goodMs: number, warnMs: num
   return "metric-slow";
 }
 
-type TransportType = "websocket" | "webrtc";
-
 export function VoiceAgentConsole() {
   const [isDark, setIsDark] = useState(true);
-  const [transportType, setTransportType] = useState<TransportType>("webrtc");
   const [mode, setMode] = useState<Mode>("listening");
   const [isRecording, setIsRecording] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
@@ -205,7 +201,6 @@ export function VoiceAgentConsole() {
   const activeLlmSeqRef = useRef<number | null>(null);
   const interruptedLlmSeqsRef = useRef<Set<number>>(new Set());
 
-  const websocketRef = useRef<WebSocket | null>(null);
   const webrtcRef = useRef<WebRTCTransport | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -222,6 +217,10 @@ export function VoiceAgentConsole() {
   const amplitudeRef = useRef(0.08);
   const waveLevelsRef = useRef(initialWaveLevels);
   const startAttemptRef = useRef(0);
+  const welcomeAudioRef = useRef<ArrayBuffer | null>(null);
+  const welcomeTextRef = useRef<string>("");
+  const welcomePlayingRef = useRef(false);
+  const pendingListeningBubbleRef = useRef<(() => void) | null>(null);
 
   // ── Voice / speed settings state ─────────────────────────────────────────
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -266,6 +265,20 @@ export function VoiceAgentConsole() {
         });
       })
       .catch(() => undefined);
+
+    // Pre-fetch the welcome audio so it can play instantly on orb click.
+    void fetch(`${backendUrl}/tts/welcome`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data: { text: string; audio: string | null } | null) => {
+        if (!data?.audio || cancelled) return;
+        welcomeTextRef.current = data.text;
+        const raw = atob(data.audio);
+        const bytes = new Uint8Array(raw.length);
+        for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+        welcomeAudioRef.current = bytes.buffer;
+      })
+      .catch(() => undefined);
+
     return () => { cancelled = true; };
   }, []);
 
@@ -283,9 +296,7 @@ export function VoiceAgentConsole() {
 
   const sendToBackend = useCallback((msg: object) => {
     const rtc = webrtcRef.current;
-    if (rtc?.isOpen) { rtc.send(msg); return; }
-    const ws = websocketRef.current;
-    if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
+    if (rtc?.isOpen) rtc.send(msg);
   }, []);
 
   // Sync voice/speed to backend whenever they change (only when connected)
@@ -550,11 +561,7 @@ export function VoiceAgentConsole() {
   }, [updateMsg]);
 
   useEffect(() => {
-    return () => {
-      stopAudioGraph();
-      websocketRef.current?.close();
-      websocketRef.current = null;
-    };
+    return () => { stopAudioGraph(); };
   }, []);
 
   const applyStreamPayload = (payload: StreamMessage) => {
@@ -604,6 +611,35 @@ export function VoiceAgentConsole() {
       bargeinFrameCountRef.current = 0;
       activeLlmSeqRef.current = null;
       interruptedLlmSeqsRef.current.clear();
+      pendingListeningBubbleRef.current = null;
+
+      // Play pre-fetched welcome audio immediately on orb click (user gesture = autoplay allowed).
+      if (welcomeAudioRef.current && welcomeTextRef.current) {
+        const ctx = new AudioContext();
+        audioContextRef.current = ctx;
+        welcomePlayingRef.current = true;
+        const wid = crypto.randomUUID();
+        const welcomeText = welcomeTextRef.current;
+        activeAssistantIdRef.current = wid;
+        setMessages((prev) => [
+          ...prev,
+          { id: wid, role: "assistant", text: welcomeText, isStreaming: false, isError: false },
+        ]);
+        ctx.decodeAudioData(welcomeAudioRef.current.slice(0))
+          .then((buffer) => {
+            const src = ctx.createBufferSource();
+            src.buffer = buffer;
+            src.connect(ctx.destination);
+            src.onended = () => {
+              welcomePlayingRef.current = false;
+              activeAssistantIdRef.current = null;
+              pendingListeningBubbleRef.current?.();
+              pendingListeningBubbleRef.current = null;
+            };
+            void ctx.resume().then(() => { src.start(); });
+          })
+          .catch(() => { welcomePlayingRef.current = false; });
+      }
 
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
@@ -622,9 +658,7 @@ export function VoiceAgentConsole() {
       isRecordingRef.current = true;
       startTransition(() => { setMode("listening"); });
 
-      // ── WebRTC path ────────────────────────────────────────────────────────
-      if (transportType === "webrtc") {
-        const transport = new WebRTCTransport(backendUrl);
+      const transport = new WebRTCTransport(backendUrl);
         webrtcRef.current = transport;
 
         // Shared message handler for WebRTC (same protocol as WebSocket).
@@ -635,13 +669,20 @@ export function VoiceAgentConsole() {
             streamReadyRef.current = true;
             transport.send({ type: "tts_voice", voice: selectedTtsVoice });
             transport.send({ type: "tts_speed", speed: ttsSpeed });
-            const uid = crypto.randomUUID();
-            activeUserIdRef.current = uid;
-            activeAssistantIdRef.current = null;
-            setMessages((prev) => [
-              ...prev,
-              { id: uid, role: "user", text: "Listening…", isStreaming: true, isError: false },
-            ]);
+            const addListeningBubble = () => {
+              const uid = crypto.randomUUID();
+              activeUserIdRef.current = uid;
+              activeAssistantIdRef.current = null;
+              setMessages((prev) => [
+                ...prev,
+                { id: uid, role: "user", text: "Listening…", isStreaming: true, isError: false },
+              ]);
+            };
+            if (welcomePlayingRef.current) {
+              pendingListeningBubbleRef.current = addListeningBubble;
+            } else {
+              addListeningBubble();
+            }
             if (payload.request_id) {
               setDebugInfo((current) => ({
                 request_id: String(payload.request_id ?? current?.request_id ?? "--"),
@@ -968,352 +1009,6 @@ export function VoiceAgentConsole() {
         transport.send({ type: "start", sample_rate: rtcAudioCtx.sampleRate, voice: selectedTtsVoice, speed: ttsSpeed });
         setIsConnecting(false);
         startTransition(() => { setMode("listening"); });
-        return;
-      }
-      // ── End WebRTC path ────────────────────────────────────────────────────
-
-      const socket = new WebSocket(websocketUrl);
-      socket.binaryType = "arraybuffer";
-      websocketRef.current = socket;
-      sessionStartedAtRef.current = performance.now();
-      streamReadyRef.current = false;
-
-      socket.onopen = async () => {
-        if (startAttemptRef.current !== startAttemptId) {
-          normalCloseRef.current = true;
-          socket.close();
-          return;
-        }
-
-        const audioContext = new AudioContext();
-        audioContextRef.current = audioContext;
-
-        const sourceNode = audioContext.createMediaStreamSource(stream);
-        const processorNode = audioContext.createScriptProcessor(2048, 1, 1);
-        const gainNode = audioContext.createGain();
-        gainNode.gain.value = 0;
-
-        sourceNode.connect(processorNode);
-        processorNode.connect(gainNode);
-        gainNode.connect(audioContext.destination);
-
-        sourceNodeRef.current = sourceNode;
-        processorNodeRef.current = processorNode;
-        gainNodeRef.current = gainNode;
-
-        processorNode.onaudioprocess = (event) => {
-          if (!streamReadyRef.current || socket.readyState !== WebSocket.OPEN) {
-            return;
-          }
-
-          const channelData = event.inputBuffer.getChannelData(0);
-          const rms = getRmsAmplitude(channelData);
-          const nextAmplitude = Math.min(1, Math.max(0.04, rms * 11.5));
-          const smoothedAmplitude = amplitudeRef.current * 0.58 + nextAmplitude * 0.42;
-          amplitudeRef.current = smoothedAmplitude;
-          setAmplitude(smoothedAmplitude);
-
-          const nextBars = [...waveLevelsRef.current.slice(1), smoothedAmplitude];
-          waveLevelsRef.current = nextBars;
-          setWaveLevels(nextBars);
-
-          if ((ttsSourceRef.current || ttsQueueRef.current.length > 0) && !interruptSentRef.current) {
-            if (rms > BARGE_IN_THRESHOLD) {
-              bargeinFrameCountRef.current += 1;
-              if (bargeinFrameCountRef.current >= BARGE_IN_FRAMES) {
-                interruptSentRef.current = true;
-                clearTtsQueue();
-                interruptCurrentLlmTurn();
-                if (socket.readyState === WebSocket.OPEN) {
-                  socket.send(JSON.stringify({ type: "interrupt" }));
-                }
-                startTransition(() => { setMode("listening"); });
-              }
-            } else {
-              bargeinFrameCountRef.current = 0;
-            }
-          }
-
-          const pcm16 = float32ToInt16(channelData);
-          socket.send(pcm16.buffer);
-        };
-
-        socket.send(
-          JSON.stringify({
-            type: "start",
-            sample_rate: audioContext.sampleRate,
-          }),
-        );
-
-        setIsConnecting(false);
-        startTransition(() => {
-          setMode("listening");
-        });
-      };
-
-      socket.onmessage = (event) => {
-        let payload: StreamMessage;
-        try {
-          payload = JSON.parse(event.data as string) as StreamMessage;
-        } catch {
-          return;
-        }
-
-        if (payload.type === "ready") {
-          streamReadyRef.current = true;
-          if (socket.readyState === WebSocket.OPEN) {
-            socket.send(JSON.stringify({ type: "tts_voice", voice: selectedTtsVoice }));
-            socket.send(JSON.stringify({ type: "tts_speed", speed: ttsSpeed }));
-          }
-          // Create the user message bubble for this recording session
-          const uid = crypto.randomUUID();
-          activeUserIdRef.current = uid;
-          activeAssistantIdRef.current = null;
-          setMessages((prev) => [...prev, { id: uid, role: "user", text: "Listening…", isStreaming: true, isError: false }]);
-          if (payload.request_id) {
-            setDebugInfo((current) => ({
-              request_id: payload.request_id ?? current?.request_id ?? "--",
-              filename: current?.filename ?? "stream.wav",
-              audio_bytes: current?.audio_bytes ?? 0,
-              detected_language: current?.detected_language ?? null,
-              segments: current?.segments ?? 0,
-              model_size: current?.model_size ?? "--",
-              device: current?.device ?? "--",
-              compute_type: current?.compute_type ?? "--",
-              sample_rate: current?.sample_rate ?? null,
-              chunks_received: current?.chunks_received ?? null,
-            }));
-          }
-          return;
-        }
-
-        if (payload.type === "partial") {
-          applyStreamPayload(payload);
-          let uid = activeUserIdRef.current;
-          if (!uid && payload.text?.trim()) {
-            uid = crypto.randomUUID();
-            activeUserIdRef.current = uid;
-            setMessages((prev) => [...prev, { id: uid!, role: "user", text: payload.text ?? "", isStreaming: true, isError: false }]);
-          } else if (uid && payload.text?.trim()) {
-            updateMsg(uid, { text: payload.text });
-          }
-          startTransition(() => { setMode("thinking"); });
-          return;
-        }
-
-        if (payload.type === "final") {
-          receivedFinalRef.current = true;
-          applyStreamPayload(payload);
-          setIsFinalizing(false);
-          isFinalizingRef.current = false;
-          const uid = activeUserIdRef.current;
-          const finalText = payload.text?.trim() ?? "";
-          if (uid) updateMsg(uid, { text: finalText || "…", isStreaming: false });
-          startTransition(() => { setMode("responding"); });
-          if (!finalText) {
-            normalCloseRef.current = true;
-            socket.close();
-          }
-          return;
-        }
-
-        if (payload.type === "llm_start") {
-          if (!shouldAcceptLlmStart(payload)) return;
-          const uid = activeUserIdRef.current;
-          const userText = payload.user_text?.trim();
-          if (uid) {
-            if (userText) {
-              updateMsg(uid, { text: userText, isStreaming: false });
-            } else {
-              setMessages((prev) => prev.filter((m) => m.id !== uid));
-            }
-          }
-          activeUserIdRef.current = null;
-          // Finalize any lingering assistant bubble rather than resetting it.
-          const prevAid = activeAssistantIdRef.current;
-          if (prevAid) {
-            const prevText = revealedTextRef.current || pendingAssistantTextRef.current;
-            if (prevText) updateMsg(prevAid, { text: prevText, isStreaming: false });
-          }
-          clearTtsQueue();
-          activeAssistantIdRef.current = null;
-          pendingAssistantTextRef.current = "";
-          revealedTextRef.current = "";
-          ttsAudioReceivedRef.current = false;
-          if (revealRafRef.current !== null) {
-            cancelAnimationFrame(revealRafRef.current);
-            revealRafRef.current = null;
-          }
-          const aid = crypto.randomUUID();
-          activeAssistantIdRef.current = aid;
-          setMessages((prev) => [...prev, { id: aid, role: "assistant", text: "", isStreaming: true, isError: false }]);
-          return;
-        }
-
-        if (payload.type === "llm_partial") {
-          if (!shouldProcessLlmTurnEvent(payload)) return;
-          // Buffer the text but DON'T render yet — we want the visible text to advance
-          // in lockstep with TTS audio playback, not race ahead of it.
-          pendingAssistantTextRef.current = payload.text ?? "";
-          startTransition(() => { setMode("responding"); });
-          return;
-        }
-
-        if (payload.type === "llm_final") {
-          if (!shouldProcessLlmTurnEvent(payload)) return;
-          pendingAssistantTextRef.current = payload.text ?? "";
-          if (payload.llm_ms != null) setLlmLatencyMs(payload.llm_ms);
-          startTransition(() => { setMode(isRecordingRef.current ? "listening" : "responding"); });
-          return;
-        }
-
-        if (payload.type === "llm_error") {
-          if (!shouldProcessLlmTurnEvent(payload)) return;
-          const aid = activeAssistantIdRef.current;
-          if (aid) updateMsg(aid, { text: typeof payload.message === "string" && payload.message ? payload.message : "AI unavailable — check your LLM provider and model.", isStreaming: false, isError: true });
-          if (!isRecordingRef.current) {
-            normalCloseRef.current = true;
-            socket.close();
-          }
-          return;
-        }
-
-        if (payload.type === "tts_start") {
-          if (!shouldProcessLlmTurnEvent(payload)) return;
-          clearTtsQueue();
-          pendingDecodesRef.current = 0;
-          ttsAudioReceivedRef.current = false;
-          startTransition(() => { setMode("speaking"); });
-          return;
-        }
-
-        if (payload.type === "tts_audio") {
-          if (!shouldProcessLlmTurnEvent(payload)) return;
-          if (payload.tts_ms != null) setTtsLatencyMs(payload.tts_ms);
-          const sentenceText = payload.sentence_text ?? pendingAssistantTextRef.current;
-          const binaryString = atob(payload.data ?? "");
-          const bytes = new Uint8Array(binaryString.length);
-          for (let i = 0; i < binaryString.length; i++) bytes[i] = binaryString.charCodeAt(i);
-          const audioCtx = audioContextRef.current ?? new AudioContext();
-          if (!audioContextRef.current) audioContextRef.current = audioCtx;
-          ttsAudioReceivedRef.current = true;
-          const decodeGeneration = ttsGenerationRef.current;
-          const decodeAssistantId = activeAssistantIdRef.current;
-          pendingDecodesRef.current++;
-          void audioCtx.decodeAudioData(
-            bytes.buffer.slice(0),
-            (buffer) => {
-              pendingDecodesRef.current = Math.max(0, pendingDecodesRef.current - 1);
-              if (
-                ttsGenerationRef.current !== decodeGeneration ||
-                activeAssistantIdRef.current !== decodeAssistantId ||
-                !shouldProcessLlmTurnEvent(payload)
-              ) {
-                return;
-              }
-              ttsQueueRef.current.push({
-                buffer,
-                text: sentenceText,
-                generation: decodeGeneration,
-                assistantId: decodeAssistantId,
-              });
-              if (!isTtsPlayingRef.current) playNextTtsChunk();
-            },
-            () => {
-              // Decode failed — drop the chunk but unblock the finalization counter.
-              pendingDecodesRef.current = Math.max(0, pendingDecodesRef.current - 1);
-              if (!isTtsPlayingRef.current) playNextTtsChunk();
-            },
-          );
-          return;
-        }
-
-        if (payload.type === "tts_done") {
-          if (!shouldProcessLlmTurnEvent(payload)) return;
-          ttsAllChunksReceivedRef.current = true;
-          if (!ttsAudioReceivedRef.current) {
-            const aid = activeAssistantIdRef.current;
-            if (aid && pendingAssistantTextRef.current) {
-              updateMsg(aid, { text: pendingAssistantTextRef.current, isStreaming: false });
-            }
-            activeAssistantIdRef.current = null;
-            pendingAssistantTextRef.current = "";
-            revealedTextRef.current = "";
-            startTransition(() => { setMode(isRecordingRef.current ? "listening" : "responding"); });
-            if (!isRecordingRef.current && receivedFinalRef.current) {
-              normalCloseRef.current = true;
-              socket.close();
-            }
-          } else if (!isTtsPlayingRef.current && ttsQueueRef.current.length === 0 && pendingDecodesRef.current === 0) {
-            const aid = activeAssistantIdRef.current;
-            if (aid) updateMsg(aid, { text: pendingAssistantTextRef.current, isStreaming: false });
-            activeAssistantIdRef.current = null;
-            pendingAssistantTextRef.current = "";
-            revealedTextRef.current = "";
-            startTransition(() => { setMode(isRecordingRef.current ? "listening" : "responding"); });
-            if (!isRecordingRef.current && receivedFinalRef.current) {
-              normalCloseRef.current = true;
-              socket.close();
-            }
-          }
-          return;
-        }
-
-        if (payload.type === "tts_interrupted") {
-          if (!shouldProcessLlmTurnEvent(payload)) return;
-          clearTtsQueue();
-          interruptCurrentLlmTurn();
-          pendingAssistantTextRef.current = "";
-          startTransition(() => { setMode("listening"); });
-          return;
-        }
-
-        if (payload.type === "error") {
-          const message = payload.message ?? "Streaming transcription failed.";
-          errorRef.current = message;
-          setError(message);
-          setIsFinalizing(false);
-          isFinalizingRef.current = false;
-          startTransition(() => {
-            setMode("listening");
-          });
-        }
-      };
-
-      socket.onerror = () => {
-        if (startAttemptRef.current !== startAttemptId) {
-          return;
-        }
-        const message = `Could not connect to backend stream at ${websocketUrl}. Run make dev and retry.`;
-        errorRef.current = message;
-        setError(message);
-        setTranscript("Streaming connection failed before transcription could start.");
-        setIsConnecting(false);
-        setIsRecording(false);
-        setIsFinalizing(false);
-        stopAudioGraph();
-      };
-
-      socket.onclose = (event) => {
-        if (startAttemptRef.current !== startAttemptId) {
-          return;
-        }
-        streamReadyRef.current = false;
-        websocketRef.current = null;
-        setIsConnecting(false);
-        setIsRecording(false);
-
-        const wasExpectedClose =
-          normalCloseRef.current || receivedFinalRef.current || isFinalizingRef.current || event.code === 1000;
-
-        if (!wasExpectedClose && !errorRef.current) {
-          const message = `Streaming connection closed unexpectedly at ${websocketUrl}.`;
-          errorRef.current = message;
-          setError(message);
-        }
-
-        stopAudioGraph();
-      };
     } catch (caughtError) {
       if (startAttemptRef.current !== startAttemptId) {
         return;
@@ -1342,50 +1037,14 @@ export function VoiceAgentConsole() {
   const stopStreaming = () => {
     startAttemptRef.current += 1;
     interruptCurrentLlmTurn();
-    const wasConnecting = isConnecting;
     setIsConnecting(false);
     setIsRecording(false);
     isRecordingRef.current = false;
     normalCloseRef.current = true;
-
-    // WebRTC: closing the transport tears down the peer connection; the server
-    // handles cleanup via connectionstatechange.  No "stop" message is sent
-    // because the session is persistent and there is no single "current utterance"
-    // to finalise — the server's silence debounce handles turn detection.
-    const transport = webrtcRef.current;
-    if (transport) {
-      stopAudioGraph(); // closes transport + mic + audio graph
-      setIsFinalizing(false);
-      isFinalizingRef.current = false;
-      startTransition(() => { setMode("listening"); });
-      return;
-    }
-
-    // WebSocket: send "stop" and let the existing WS pipeline finalise.
-    const socket = websocketRef.current;
-    if (wasConnecting) {
-      websocketRef.current = null;
-      socket?.close();
-      stopAudioGraph();
-      setIsFinalizing(false);
-      isFinalizingRef.current = false;
-      startTransition(() => { setMode("listening"); });
-      return;
-    }
-
-    setIsFinalizing(true);
-    isFinalizingRef.current = true;
     stopAudioGraph();
-    if (socket?.readyState === WebSocket.OPEN) {
-      socket.send(JSON.stringify({ type: "stop" }));
-      startTransition(() => {
-        setMode("thinking");
-      });
-      return;
-    }
-
     setIsFinalizing(false);
     isFinalizingRef.current = false;
+    startTransition(() => { setMode("listening"); });
   };
 
   const activeMode = modeConfig[mode];
@@ -1448,26 +1107,6 @@ export function VoiceAgentConsole() {
           </div>
           <div className="topbar-meta">
             <span className="status-pill is-live">Live call support</span>
-            <div className="transport-toggle" aria-label="Select audio transport">
-              <button
-                type="button"
-                className={`transport-btn${transportType === "webrtc" ? " is-active" : ""}`}
-                disabled={isRecording || isConnecting}
-                onClick={() => setTransportType("webrtc")}
-                title="WebRTC — Opus/RTP over UDP with built-in echo cancellation and server-side VAD. Recommended."
-              >
-                WebRTC
-              </button>
-              <button
-                type="button"
-                className={`transport-btn${transportType === "websocket" ? " is-active" : ""}`}
-                disabled={isRecording || isConnecting}
-                onClick={() => setTransportType("websocket")}
-                title="WebSocket — raw PCM over TCP. Simpler but no echo cancellation. Use if WebRTC fails."
-              >
-                WebSocket
-              </button>
-            </div>
             <button
               type="button"
               className="theme-toggle"

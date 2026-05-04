@@ -175,10 +175,9 @@ class WebRTCSession:
     # ── Data-channel open / message ──────────────────────────────────────────
 
     async def _on_dc_open(self) -> None:
-        """Send the ``ready`` signal and start the welcome message once the data channel opens."""
+        """Send the ``ready`` signal once the data channel opens."""
         logger.info("session_id={} event=dc_open", self.session_id)
         await self._send_json({"type": "ready", "request_id": self.session_id})  # Tell the browser "I'm ready, here's your session ID"
-        asyncio.ensure_future(self._run_welcome())  # Start welcome TTS in background — don't block the data channel open handler
 
     async def _handle_dc_message(self, raw: str) -> None:
         """Dispatch an incoming JSON data-channel message to the appropriate handler.
@@ -927,39 +926,6 @@ class WebRTCSession:
                 self._llm_task = asyncio.create_task(self._run_llm(self._llm_seq, next_text))
                 return  # Return here — self._llm_task is already set to the new task
         self._llm_task = None  # No pending call — this session is back to "listening"
-
-    # ── Welcome message ──────────────────────────────────────────────────────
-
-    async def _run_welcome(self) -> None:
-        """Synthesise and stream the configured welcome message at session open.
-
-        Splits ``settings.welcome_message`` on sentence boundaries so the
-        frontend receives individual ``tts_audio`` events with ``sentence_text``,
-        matching the format produced by the regular LLM pipeline.  Skipped if
-        the welcome message is empty.  Barge-in is disabled so ambient noise
-        does not cancel the greeting before the user speaks.
-        """
-        welcome = self._settings.welcome_message  # e.g. "Hi! I'm NeuroTalk. How can I help?"
-        if not welcome:
-            return  # Welcome message disabled in settings — skip
-
-        await self._send_json({"type": "llm_start", "user_text": ""})
-        # Mimic the normal llm_start event so the browser creates an assistant message bubble
-        await self._send_json({"type": "llm_final", "text": welcome, "llm_ms": 0})
-        # Immediately send the full welcome text (it's not generated — it's a fixed string)
-
-        sent_queue: asyncio.Queue[str | None] = asyncio.Queue()
-        for raw in re.split(r"(?<=[.!?])\s+", welcome.strip()):
-            # Split the welcome message into sentences using regex
-            # (?<=[.!?]) is a lookbehind: split AFTER . ! ? (not before)
-            sentence = clean_for_tts(raw.strip())
-            if sentence:
-                sent_queue.put_nowait(sentence)  # Add each sentence to the TTS queue
-        sent_queue.put_nowait(None)  # End-of-stream sentinel
-
-        await self._tts_sentence_pipeline(0, sent_queue, enable_barge_in=False)
-        # llm_seq=0 for welcome; enable_barge_in=False so ambient room noise doesn't
-        # cancel the greeting before the user has had a chance to speak
 
     # ── Helpers ──────────────────────────────────────────────────────────────
 
