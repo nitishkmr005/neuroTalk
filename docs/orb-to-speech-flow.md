@@ -350,25 +350,238 @@ The session stays open. VAD is watching the microphone. The system is ready for 
 
 ---
 
-## Full Timeline (WebRTC path)
+## Full Parameter Timeline (WebRTC path)
+
+Every timeout and threshold from `settings.py` is annotated at the exact moment it takes effect.
+Two scenarios are shown side-by-side: a fast speaker where Smart Turn confirms immediately,
+and a slow/deliberate speaker where Smart Turn needs its extra patience window.
+
+---
+
+### Scenario A — Fast Speaker (Smart Turn confirms on first check)
 
 ```
-t=0ms      User clicks orb
-t=50ms     WebRTC peer connection established
-t=100ms    Data channel opens → backend sends {"type": "ready"}
-t=100ms    Welcome message TTS starts streaming
-t=Xms      User starts speaking (VAD fires "start")
-t=X+700ms  Partial transcript sent (every 700ms)
-t=Yms      User stops speaking (VAD fires "end")
-t=Y+50ms   Smart Turn checks if utterance is complete
-t=Y+200ms  Final transcript sent
-t=Y+200ms  LLM call starts
-t=Y+2000ms First LLM sentence complete → TTS starts for sentence 1
-t=Y+2400ms tts_audio chunk 1 sent → browser plays
-t=Y+3000ms tts_audio chunk 2 sent → browser plays
-...
-t=Zms      tts_done sent → turn complete, back to listening
+t=0ms       User clicks orb
+t=50ms      WebRTC SDP offer/answer exchange completes (ICE + DTLS handshake)
+t=100ms     Data channel opens → {"type": "ready"} sent to browser
+t=100ms     Welcome TTS starts (barge-in disabled for welcome greeting)
+t=~2000ms   Welcome TTS done → system enters listening state
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ USER STARTS SPEAKING
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+t=Xms       Opus RTP frames arrive. Resampled 48kHz → 16kHz.
+            Silero VAD checks every 32ms                ← stream_vad_frame_samples = 512 samples @ 16kHz
+              fan noise  → speech_prob ≈ 0.05           }
+              keyboard   → speech_prob ≈ 0.25           }  all below threshold → ignored
+              speech     → speech_prob ≈ 0.90           }
+                                                         ← stream_vad_threshold = 0.6
+            speech_prob 0.90 ≥ 0.60 → VAD fires "start"
+            Any running silence debounce timer cancelled
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ PARTIAL STT LOOP  (repeats while user speaks)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+t=X+500ms   Buffer = 500ms of audio                     ← stream_min_audio_ms = 500
+            Time since last emit = 500ms                 ← stream_emit_interval_ms = 700
+            500ms < 700ms → NOT YET, keep accumulating
+
+t=X+700ms   Buffer = 700ms of audio                     ← stream_min_audio_ms = 500 ✓
+            Time since last emit = 700ms                 ← stream_emit_interval_ms = 700 ✓
+            Both thresholds met → run Whisper
+              DeepFilterNet3 denoises buffer             ← denoise_enabled = True
+              Whisper runs (beam_size=1, greedy decode)  ← stt_beam_size = 1  (fastest)
+                stt_vad_filter=True strips silent frames ← stt_vad_filter = True
+            {"type": "partial", "text": "How are you"} → browser
+            Silence debounce armed: wait 500ms           ← stream_llm_silence_ms = 500
+
+t=X+1400ms  700ms interval passes again                  ← stream_emit_interval_ms = 700 ✓
+            Buffer = 1400ms of audio                     ← stream_min_audio_ms = 500 ✓
+            Whisper runs on full buffer (more context, better result)
+            {"type": "partial", "text": "How are you doing"} → browser
+            Debounce timer reset to fresh 500ms countdown
+
+t=X+2100ms  {"type": "partial", "text": "How are you doing today"} → browser
+            Debounce timer reset again
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ USER STOPS SPEAKING
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+t=Yms       User goes silent. Silero keeps checking every 32ms.
+            speech_prob drops below threshold − 0.15 = 0.45
+                                                         ← stream_vad_threshold − 0.15 (neg_threshold)
+            VAD waits for sustained silence to confirm end-of-speech...
+
+t=Y+500ms   500ms of continuous silence confirmed        ← stream_vad_min_silence_ms = 500
+              250ms of audio padding included around edges← stream_vad_speech_pad_ms = 250
+              (ensures first/last syllable not clipped by Whisper)
+            VAD fires "end"
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ SMART TURN GATE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+t=Y+500ms   vad_triggered=True → use 50ms grace wait (not the full 500ms silence timer)
+t=Y+550ms   Smart Turn check 1: ONNX model evaluates "How are you doing today?"
+              model outputs 0.82                         ← stream_smart_turn_threshold = 0.65
+              0.82 ≥ 0.65 → COMPLETE ✓  (used only 1 of 3 allowed checks)
+                                                         ← stream_smart_turn_base_wait_ms = 200
+                                                         ← stream_smart_turn_max_budget_ms = 600
+            → _schedule_speech_finalization() called
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ FINAL STT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+t=Y+550ms   DeepFilterNet3 denoises full PCM buffer      ← denoise_enabled = True
+            Whisper transcribes with beam_size=1          ← stt_beam_size = 1
+              model: small.en, device: cpu, compute: int8 ← stt_model_size / stt_device / stt_compute_type
+
+t=Y+750ms   Whisper done (~200ms on small.en CPU)
+            transcript = "How are you doing today?" (24 chars)
+              24 ≥ 8 → LLM guard passes                  ← stream_llm_min_chars = 8
+              not a pause command ("wait", "hold on" etc) ← _PAUSE_PATTERN check
+            {"type": "final", "text": "How are you doing today?"} → browser
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ LLM INFERENCE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+t=Y+750ms   _run_llm() starts. Builds message list:
+              system prompt + conversation history        ← llm_max_history_turns = 6
+                up to 12 messages (6 user + 6 assistant)
+                oldest turn dropped if history > 6 turns
+            {"type": "llm_start", "user_text": "..."} → browser
+            TTS pipeline task starts concurrently (waiting on sentence queue)
+
+t=Y+750ms   LLM streams tokens one by one (async for)
+            {"type": "llm_partial", "text": "I'm doing..."} → browser (per token)
+
+t=Y+2000ms  First sentence boundary "!" detected in LLM output
+            sentence = "I'm doing great, thanks for asking!"
+            → put into TTS queue
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ TTS — SENTENCE BY SENTENCE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+t=Y+2000ms  Kokoro MLX synthesizes sentence 1 (~300ms)
+t=Y+2300ms  {"type": "tts_start"} → browser
+            {"type": "tts_audio", "data": "<base64 WAV>",
+             "sentence_text": "I'm doing great, thanks for asking!"} → browser
+            _is_agent_speaking = True  (barge-in now active)
+
+t=Y+2500ms  LLM produces sentence 2: "How about you?"
+            sentence boundary "?" detected → into TTS queue
+            Kokoro synthesizes sentence 2 (~150ms for short phrase)
+t=Y+2650ms  {"type": "tts_audio", "sentence_text": "How about you?"} → browser
+
+t=Y+2800ms  LLM finishes streaming all tokens
+            {"type": "llm_final", "text": "I'm doing great... How about you?",
+             "llm_ms": 2050} → browser
+            {"type": "tts_done"} → browser
+            _is_agent_speaking = False
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ TURN RESET — BACK TO LISTENING
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+t=Y+2800ms  PCM buffer cleared, chunk_count reset, last_emit_at reset
+            VAD stream state reset (Silero internal state cleared)
+            Conversation history updated:
+              +1 user turn + 1 assistant turn appended
+              if history > 6 turns → oldest pair dropped  ← llm_max_history_turns = 6
+            System back to listening. VAD watching every 32ms frame.
+
+──────────────────────────────────────────────────────────────
+ TOTAL E2E LATENCY (from user stops speaking to AI starts speaking)
+──────────────────────────────────────────────────────────────
+   VAD silence confirmation  500ms   ← stream_vad_min_silence_ms
+   Grace wait + Smart Turn    50ms   ← 50ms grace (vad_triggered path)
+   Final STT (small.en CPU)  200ms   ← stt_model_size, stt_device
+   LLM first sentence       1250ms   ← model + hardware dependent
+   TTS sentence 1            300ms   ← tts_backend (Kokoro MLX)
+   ─────────────────────────────────
+   Total                   ~2300ms   ← user stops → AI starts speaking
 ```
+
+---
+
+### Scenario B — Slow/Deliberate Speaker (Smart Turn needs extra time)
+
+```
+... (identical up to VAD fires "end" at t=Y+500ms) ...
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ SMART TURN GATE — model says incomplete
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+t=Y+550ms   Smart Turn check 1: "I want to..."
+              model outputs 0.30 < 0.65 → incomplete     ← stream_smart_turn_threshold = 0.65
+              wait 200ms before next check               ← stream_smart_turn_base_wait_ms = 200
+
+t=Y+750ms   Smart Turn check 2: "I want to..."
+              model outputs 0.40 < 0.65 → still incomplete
+              wait another 200ms                         ← stream_smart_turn_base_wait_ms = 200
+
+t=Y+950ms   Smart Turn check 3: "I want to..."
+              model outputs 0.45 < 0.65 → still incomplete
+              600ms budget exhausted (3 × 200ms = 600ms) ← stream_smart_turn_max_budget_ms = 600
+              → start extra patience window              ← stream_smart_turn_incomplete_wait_ms = 1500
+
+              ┌─────────────── 1500ms patience window ───────────────┐
+
+CASE B1 — User resumes speaking (mid-window):
+t=Y+1200ms  User says "...know about Python."
+            VAD fires "start" → patience window task cancelled ✓
+            New audio flows into buffer, partial loop restarts
+            (same flow as Scenario A from "User starts speaking")
+
+CASE B2 — User stays silent for the full window:
+t=Y+2450ms  1500ms patience window expires               ← stream_smart_turn_incomplete_wait_ms = 1500
+            Final STT runs on "I want to" (12 chars ≥ 8) ← stream_llm_min_chars = 8
+            LLM fires with the partial utterance
+            (LLM may ask "Could you finish your thought?" based on system prompt)
+
+──────────────────────────────────────────────────────────────
+ TOTAL E2E LATENCY for Scenario B (Case B2)
+──────────────────────────────────────────────────────────────
+   VAD silence confirmation    500ms   ← stream_vad_min_silence_ms
+   Grace wait                   50ms
+   Smart Turn polling (3 checks)600ms  ← stream_smart_turn_max_budget_ms
+   Extra patience window       1500ms  ← stream_smart_turn_incomplete_wait_ms
+   Final STT                    200ms
+   LLM first sentence          1250ms
+   TTS sentence 1               300ms
+   ──────────────────────────────────
+   Total                      ~4400ms  ← significantly longer for slow speakers
+```
+
+---
+
+### Parameter → Timeline Position Cheat Sheet
+
+| Setting | Default | Where it fires in the timeline |
+|---|---|---|
+| `stream_vad_frame_samples` | 512 | Every 32ms while mic is open — VAD check granularity |
+| `stream_vad_threshold` | 0.6 | The gate that turns raw audio into "speech start" event |
+| `stream_vad_min_silence_ms` | 500ms | How long silence must persist before "speech end" fires |
+| `stream_vad_speech_pad_ms` | 250ms | Audio margin included before/after detected speech for STT |
+| `stream_min_audio_ms` | 500ms | Minimum buffer before Whisper is even attempted |
+| `stream_emit_interval_ms` | 700ms | Cadence of partial transcript updates to the browser |
+| `stream_llm_silence_ms` | 500ms | Debounce: LLM fires only after this much silence |
+| `stream_smart_turn_threshold` | 0.65 | ONNX model confidence required to declare turn complete |
+| `stream_smart_turn_base_wait_ms` | 200ms | Gap between consecutive Smart Turn checks |
+| `stream_smart_turn_max_budget_ms` | 600ms | Total clock time Smart Turn is allowed to use |
+| `stream_smart_turn_incomplete_wait_ms` | 1500ms | Extra patience if Smart Turn never reaches threshold |
+| `stream_llm_min_chars` | 8 | Transcript must be at least this long before LLM fires |
+| `stt_beam_size` | 1 | Controls STT accuracy vs. speed (1 = greedy, fastest) |
+| `stt_vad_filter` | True | Strips silent frames from audio before Whisper sees them |
+| `denoise_enabled` | True | DeepFilterNet3 runs on PCM buffer before every STT call |
+| `llm_max_history_turns` | 6 | How many prior turns the LLM can see (sliding window) |
 
 ---
 
