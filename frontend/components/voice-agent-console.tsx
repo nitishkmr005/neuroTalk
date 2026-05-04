@@ -150,6 +150,13 @@ function formatSeconds(valueMs: number | null | undefined, options?: { cachedWhe
   return `${(valueMs / 1000).toFixed(valueMs >= 1000 ? 2 : 3)} s`;
 }
 
+function latencyClass(ms: number | null | undefined, goodMs: number, warnMs: number): string {
+  if (ms == null) return "";
+  if (ms <= goodMs) return "metric-good";
+  if (ms <= warnMs) return "metric-warn";
+  return "metric-slow";
+}
+
 type TransportType = "websocket" | "webrtc";
 
 export function VoiceAgentConsole() {
@@ -1393,35 +1400,39 @@ export function VoiceAgentConsole() {
   const signalDescriptor =
     amplitude > 0.58 ? "High energy" : amplitude > 0.28 ? "Active voice" : isRecording ? "Low input" : "Idle";
 
+  const e2eMs = metrics?.total_ms != null && llmLatencyMs != null && ttsLatencyMs != null
+    ? metrics.total_ms + llmLatencyMs + ttsLatencyMs
+    : metrics?.total_ms != null && llmLatencyMs != null
+      ? metrics.total_ms + llmLatencyMs
+      : metrics?.total_ms ?? null;
+
   const latencyCards = [
     {
       title: "STT",
       label: "Transcription",
       value: formatSeconds(metrics?.transcribe_ms),
+      colorClass: latencyClass(metrics?.transcribe_ms, 500, 1500),
       detail: "faster-whisper transcription time per buffer pass.",
     },
     {
       title: "LLM",
       label: "Response Generation",
       value: formatSeconds(llmLatencyMs),
+      colorClass: latencyClass(llmLatencyMs, 2000, 6000),
       detail: "End-to-end Ollama response time for the last completed reply.",
     },
     {
       title: "TTS",
       label: "Voice Synthesis",
       value: formatSeconds(ttsLatencyMs),
+      colorClass: latencyClass(ttsLatencyMs, 800, 2000),
       detail: "Chatterbox Turbo synthesis time for the last AI reply.",
     },
     {
       title: "E2E",
       label: "Turn Latency",
-      value: formatSeconds(
-        metrics?.total_ms != null && llmLatencyMs != null && ttsLatencyMs != null
-          ? metrics.total_ms + llmLatencyMs + ttsLatencyMs
-          : metrics?.total_ms != null && llmLatencyMs != null
-            ? metrics.total_ms + llmLatencyMs
-            : metrics?.total_ms ?? null
-      ),
+      value: formatSeconds(e2eMs),
+      colorClass: latencyClass(e2eMs, 3000, 8000),
       detail: "Combined STT + LLM + TTS pipeline time for the last session.",
     },
   ];
@@ -1497,7 +1508,7 @@ export function VoiceAgentConsole() {
         </header>
 
         <section className="hero-grid">
-          <article className="hero-panel surface">
+          <article className="hero-panel surface" data-mode={mode}>
             <div className="hero-copy">
               <span className={`mode-chip ${activeMode.accent}`}>
                 {(mode === "listening" || mode === "speaking") && (
@@ -1598,7 +1609,7 @@ export function VoiceAgentConsole() {
                 {latencyCards.map((card) => (
                   <div key={card.title}>
                     <span>{card.label}</span>
-                    <strong>{card.value}</strong>
+                    <strong className={card.colorClass}>{card.value}</strong>
                   </div>
                 ))}
               </div>
@@ -1648,7 +1659,14 @@ export function VoiceAgentConsole() {
               <div className="chat-thread">
                 {messages.length === 0 ? (
                   <div className="chat-empty">
-                    <p>Start a recording to begin the conversation.</p>
+                    <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                      <path d="M12 2a3 3 0 0 1 3 3v7a3 3 0 0 1-6 0V5a3 3 0 0 1 3-3z"/>
+                      <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+                      <line x1="12" y1="19" x2="12" y2="23"/>
+                      <line x1="8" y1="23" x2="16" y2="23"/>
+                    </svg>
+                    <p>Tap the orb to begin.</p>
+                    <span>Your conversation will appear here.</span>
                   </div>
                 ) : (
                   messages.map((msg) => (
