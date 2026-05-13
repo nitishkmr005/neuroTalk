@@ -22,15 +22,16 @@ class SpeechToTextService:
         self,
         settings: Settings,
         *,
-        model_id: str | None = None,       # name or path; overrides stt_model_dir
+        model_id: str | None = None,          # model name or flat-file path
         model_size_label: str | None = None,  # for logging/debug only
         beam_size: int | None = None,
+        download_root: Path | None = None,    # HF cache root; None = default HF cache
     ) -> None:
         self.settings = settings
-        # model_id: explicit override > settings.stt_model_dir
         self._model_id = model_id if model_id is not None else str(settings.stt_model_dir)
         self._model_size_label = model_size_label or settings.stt_model_size
         self._beam_size = beam_size if beam_size is not None else settings.stt_beam_size
+        self._download_root = download_root
         self._model: WhisperModel | None = None
 
     def _load_model(self) -> tuple[WhisperModel, float]:
@@ -44,10 +45,14 @@ class SpeechToTextService:
             self.settings.stt_compute_type,
         )
         started_at = perf_counter()
+        extra: dict = {}
+        if self._download_root is not None:
+            extra["download_root"] = str(self._download_root)
         self._model = WhisperModel(
             self._model_id,
             device=self.settings.stt_device,
             compute_type=self.settings.stt_compute_type,
+            **extra,
         )
         model_load_ms = round((perf_counter() - started_at) * 1000, 2)
         logger.info("event=model_load_finished model_load_ms={}", model_load_ms)
@@ -109,16 +114,17 @@ def get_stt_service() -> SpeechToTextService:
 def get_meeting_stt_service() -> SpeechToTextService:
     """STT service using a larger Whisper model for meeting transcription.
 
-    Uses meeting_stt_model_dir if it exists on disk (pre-downloaded via
-    ``make meeting-models``), otherwise falls back to downloading by
-    meeting_stt_model_size name via faster-whisper's auto-download.
+    Always uses the model name (e.g. "large-v3-turbo") so faster-whisper
+    resolves the HuggingFace cache structure inside meeting_stt_model_dir.
+    If the directory doesn't exist, faster-whisper downloads to its default
+    HF cache (~/.cache/huggingface/hub/).
     """
     settings = get_settings()
     model_dir = settings.meeting_stt_model_dir
-    model_id = str(model_dir) if model_dir.exists() else settings.meeting_stt_model_size
     return SpeechToTextService(
         settings,
-        model_id=model_id,
+        model_id=settings.meeting_stt_model_size,   # name, not path — HF resolves cache
         model_size_label=settings.meeting_stt_model_size,
         beam_size=settings.meeting_stt_beam_size,
+        download_root=model_dir if model_dir.exists() else None,
     )

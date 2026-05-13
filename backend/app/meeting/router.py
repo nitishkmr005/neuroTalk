@@ -73,15 +73,19 @@ async def _dispatch(messages: list[dict[str, str]]) -> AsyncGenerator[str, None]
     from config.settings import get_settings
 
     settings = get_settings()
-    provider = settings.llm_provider
 
-    # Override model with meeting-specific setting when available
-    if provider == "llama-cpp":
-        mp = settings.meeting_llm_llamacpp_model_path
-        if mp and Path(mp).exists():
-            settings = settings.model_copy(update={"llm_llamacpp_model_path": mp})
-    elif settings.meeting_llm_model:
-        settings = settings.model_copy(update={"llm_model": settings.meeting_llm_model})
+    # Use meeting-specific provider + model when configured
+    overrides: dict = {}
+    if settings.meeting_llm_provider:
+        overrides["llm_provider"] = settings.meeting_llm_provider
+    if settings.meeting_llm_model and settings.meeting_llm_provider != "llama-cpp":
+        overrides["llm_model"] = settings.meeting_llm_model
+    elif settings.meeting_llm_llamacpp_model_path and Path(settings.meeting_llm_llamacpp_model_path).exists():
+        overrides["llm_llamacpp_model_path"] = settings.meeting_llm_llamacpp_model_path
+    if overrides:
+        settings = settings.model_copy(update=overrides)
+
+    provider = settings.llm_provider
 
     if provider == "ollama":
         async for t in _stream_ollama(messages, settings):

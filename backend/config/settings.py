@@ -315,18 +315,18 @@ class Settings(BaseSettings):
     # ─────────────────────────────────────────────────────────────────────────
 
     # STT: use a larger Whisper variant for batch meeting transcription.
-    # If meeting_stt_model_dir exists on disk, it is used directly.
-    # Otherwise faster-whisper auto-downloads by meeting_stt_model_size name.
-    # Run `make meeting-models` to pre-download to models/meeting_stt/.
+    # meeting_stt_model_dir is used as download_root (HF cache structure).
+    # Run `make meeting-models` to pre-download; auto-downloads on first use otherwise.
     meeting_stt_model_size: str = "large-v3-turbo"
     meeting_stt_model_dir: Path = Path("models/meeting_stt")
     meeting_stt_beam_size: int = 5   # higher = better accuracy, slower
 
-    # LLM: override the default model for meeting summarization.
-    # For ollama providers set meeting_llm_model (e.g. "qwen2.5:7b").
-    # For llama-cpp set meeting_llm_llamacpp_model_path to a GGUF file.
-    # Leave empty to fall back to the default llm_model / llm_llamacpp_model_path.
-    meeting_llm_model: str = "qwen2.5:7b"
+    # LLM: meeting summarization can use a different provider and model than the
+    # real-time voice agent so quality is prioritised over latency.
+    # meeting_llm_provider: "ollama" | "openai" | "anthropic" | "gemini" | "llama-cpp" | ""
+    # Leave empty to reuse the main llm_provider.
+    meeting_llm_provider: str = "ollama"
+    meeting_llm_model: str = "qwen3:8b"        # ollama model (already pulled)
     meeting_llm_llamacpp_model_path: Path = Path("models/meeting_llm/Qwen2.5-7B-Instruct-Q4_K_M.gguf")
 
     # ─────────────────────────────────────────────────────────────────────────

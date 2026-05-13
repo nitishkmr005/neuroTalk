@@ -44,12 +44,12 @@ print('Downloading Whisper large-v3-turbo...'); \
 WhisperModel('large-v3-turbo', device='cpu', compute_type='int8', download_root='models/meeting_stt'); \
 print('Done -> models/meeting_stt/')"
 
-meeting-llm-ollama:  ## Pull better Ollama model for meeting summarization
-	@if ollama list | grep -q "qwen2.5:7b"; then \
-		echo "qwen2.5:7b already downloaded"; \
+meeting-llm-ollama: ollama  ## Pull Ollama model for meeting summarization
+	@if ollama list | grep -q "qwen3:8b"; then \
+		echo "qwen3:8b already downloaded"; \
 	else \
-		echo "Pulling qwen2.5:7b for meeting summarization..."; \
-		ollama pull qwen2.5:7b; \
+		echo "Pulling qwen3:8b for meeting summarization..."; \
+		ollama pull qwen3:8b; \
 	fi
 
 # ── Servers ───────────────────────────────────────────────────────────────────
@@ -103,7 +103,7 @@ free-ports: free-backend-port free-frontend-port
 
 # ── Dev (all-in-one) ──────────────────────────────────────────────────────────
 
-dev: free-ports ollama-pull
+dev: free-ports ollama-pull meeting-llm-ollama
 	@trap 'kill 0' EXIT; $(MAKE) backend & $(MAKE) frontend & wait
 
 run: dev
