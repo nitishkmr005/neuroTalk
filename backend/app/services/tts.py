@@ -102,8 +102,10 @@ class TTSService:
         from mlx_audio.tts.models.chatterbox_turbo.chatterbox_turbo import ChatterboxTurboTTS
         is_turbo = isinstance(self._model, ChatterboxTurboTTS)
         if is_turbo:
-            # Turbo: pass emotion tags inline — the T3 model processes [laugh], [sigh] etc.
-            synthesis_text = text
+            # Turbo: normalize tag variants and strip unknowns before T3 sees the text.
+            # Unrecognized [tags] are read aloud verbatim; canonical special tokens are not.
+            from app.utils.emotion import normalize_for_turbo
+            synthesis_text = normalize_for_turbo(text)
             kwargs: dict = {}
         else:
             # Standard Chatterbox: strip tags from text, drive emotion via exaggeration float.
