@@ -2,6 +2,7 @@
 
 import { Fragment, startTransition, useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 import { WebRTCTransport } from "./webrtc-transport";
+import { MeetingRecorder } from "./meeting-recorder";
 
 type Mode = "listening" | "thinking" | "responding" | "speaking";
 
@@ -224,6 +225,7 @@ export function VoiceAgentConsole() {
 
   // ── Voice / speed settings state ─────────────────────────────────────────
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [appMode, setAppMode] = useState<"agent" | "meeting">("agent");
   const [ttsVoices, setTtsVoices] = useState<TtsVoice[]>([]);
   const [selectedTtsVoice, setSelectedTtsVoice] = useState<string>(DEFAULT_TTS_VOICE);
   const [ttsSpeed, setTtsSpeed] = useState<number>(DEFAULT_TTS_SPEED);
@@ -1106,7 +1108,24 @@ export function VoiceAgentConsole() {
             <p className="topbar-tagline">Live transcription · AI reasoning · Expressive voice synthesis</p>
           </div>
           <div className="topbar-meta">
-            <span className="status-pill is-live">Live call support</span>
+            <div className="transport-toggle" role="group" aria-label="Switch mode">
+              <button
+                type="button"
+                className={`transport-btn${appMode === "agent" ? " is-active" : ""}`}
+                onClick={() => setAppMode("agent")}
+                aria-pressed={appMode === "agent"}
+              >
+                Voice Agent
+              </button>
+              <button
+                type="button"
+                className={`transport-btn${appMode === "meeting" ? " is-active" : ""}`}
+                onClick={() => setAppMode("meeting")}
+                aria-pressed={appMode === "meeting"}
+              >
+                Meeting
+              </button>
+            </div>
             <button
               type="button"
               className="theme-toggle"
@@ -1146,7 +1165,10 @@ export function VoiceAgentConsole() {
           </div>
         </header>
 
-        <section className="hero-grid">
+        {/* MeetingRecorder stays mounted to preserve state; visibility controlled via CSS */}
+        <div style={{ display: "contents" }}>
+          <MeetingRecorder backendUrl={backendUrl} active={appMode === "meeting"} />
+        <section className="hero-grid" style={{ display: appMode === "agent" ? undefined : "none" }}>
           <article className="hero-panel surface" data-mode={mode}>
             <div className="hero-copy">
               <span className={`mode-chip ${activeMode.accent}`}>
@@ -1354,6 +1376,7 @@ export function VoiceAgentConsole() {
             </article>
           </aside>
         </section>
+        </div>
 
       </section>
 

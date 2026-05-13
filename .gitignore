@@ -48,5 +48,9 @@ AGENTS.md
 # Model files — large binaries, downloaded separately; never commit
 backend/models/
 
+# Meeting recordings — saved locally, not committed
+backend/recordings/
+!backend/recordings/.gitkeep
+
 # uv
 # (uv.lock is intentionally tracked)
