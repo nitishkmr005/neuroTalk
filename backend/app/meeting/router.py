@@ -1,4 +1,4 @@
-"""Meeting recorder feature: /meeting/summarize streaming endpoint.
+"""Meeting recorder feature: transcription, summarization, and file saving.
 
 This module is self-contained and can be removed without touching other code:
 1. Delete  backend/app/meeting/
@@ -10,18 +10,21 @@ This module is self-contained and can be removed without touching other code:
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 from pathlib import Path
+from time import perf_counter
 from typing import AsyncGenerator
+from uuid import uuid4
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 from loguru import logger
 from pydantic import BaseModel
 
-_RECORDINGS_DIR = Path(__file__).parent.parent.parent / "recordings"
-
 router = APIRouter(prefix="/meeting", tags=["meeting"])
+
+_RECORDINGS_DIR = Path(__file__).parent.parent.parent / "recordings"
 
 _SUMMARIZE_SYSTEM = (
     "You are a professional meeting summarizer. "
@@ -33,22 +36,33 @@ _SUMMARIZE_SYSTEM = (
     "Be concise. Skip any section that has nothing to report."
 )
 
-# Longest transcript we'll forward to the LLM. Keeps us within typical
-# local-model context windows (~4 K–8 K tokens ≈ 16 K–32 K chars).
 _MAX_TRANSCRIPT_CHARS = 24_000
 
+
+# ── Models ────────────────────────────────────────────────────────────────────
 
 class SummarizeRequest(BaseModel):
     text: str
 
 
 class SaveRequest(BaseModel):
+    session: str | None = None   # timestamp folder name, e.g. "2024_01_15_14_30_00"
     transcript: str | None = None
     summary: str | None = None
 
 
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _session_dir(session: str | None) -> Path:
+    """Return (and create) the recordings subfolder for a session."""
+    name = session or datetime.now().strftime("%Y%m%d_%H%M%S")
+    d = _RECORDINGS_DIR / name
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 async def _dispatch(messages: list[dict[str, str]]) -> AsyncGenerator[str, None]:
-    """Forward a pre-built message list to the configured LLM provider."""
+    """Forward messages to the configured LLM, using meeting-specific model if set."""
     from app.services.llm import (
         _stream_anthropic,
         _stream_gemini,
@@ -60,6 +74,15 @@ async def _dispatch(messages: list[dict[str, str]]) -> AsyncGenerator[str, None]
 
     settings = get_settings()
     provider = settings.llm_provider
+
+    # Override model with meeting-specific setting when available
+    if provider == "llama-cpp":
+        mp = settings.meeting_llm_llamacpp_model_path
+        if mp and Path(mp).exists():
+            settings = settings.model_copy(update={"llm_llamacpp_model_path": mp})
+    elif settings.meeting_llm_model:
+        settings = settings.model_copy(update={"llm_model": settings.meeting_llm_model})
+
     if provider == "ollama":
         async for t in _stream_ollama(messages, settings):
             yield t
@@ -79,23 +102,67 @@ async def _dispatch(messages: list[dict[str, str]]) -> AsyncGenerator[str, None]
         raise ValueError(f"Unknown llm_provider {provider!r}")
 
 
+# ── Endpoints ─────────────────────────────────────────────────────────────────
+
+@router.post("/transcribe")
+async def transcribe_meeting_segment(audio: UploadFile = File(...)) -> dict:
+    """Transcribe a meeting audio segment using the high-quality meeting STT model.
+
+    Uses ``large-v3-turbo`` (beam_size=5) instead of the real-time STT model
+    so accuracy is prioritised over latency for batch meeting segments.
+
+    Args:
+        audio: Uploaded WebM/WAV audio segment.
+
+    Returns:
+        ``{ "text": "..." }``
+    """
+    from app.services.stt import get_meeting_stt_service
+    from config.settings import get_settings
+
+    settings = get_settings()
+    request_id = uuid4().hex[:8]
+    content = await audio.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Audio segment is empty.")
+
+    filename = audio.filename or "segment.webm"
+    suffix = Path(filename).suffix or ".webm"
+    temp_path = settings.temp_dir / f"meeting_{request_id}{suffix}"
+    settings.temp_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        temp_path.write_bytes(content)
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None,
+            lambda: get_meeting_stt_service().transcribe(
+                file_path=temp_path,
+                request_id=request_id,
+                filename=filename,
+                audio_bytes=len(content),
+            ),
+        )
+        logger.info(
+            "event=meeting_transcribe_done request_id={} ms={} text_len={}",
+            request_id,
+            result.timings_ms.transcribe_ms,
+            len(result.text),
+        )
+        return {"text": result.text}
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
 @router.post("/summarize")
 async def summarize(body: SummarizeRequest) -> StreamingResponse:
-    """Stream a meeting summary for the provided transcript.
-
-    Sends the transcript (truncated to ``_MAX_TRANSCRIPT_CHARS`` if needed)
-    to the configured LLM with a summarisation system prompt. Tokens are
-    streamed back as ``text/plain`` so the browser can display them
-    incrementally via a ``ReadableStream`` fetch.
+    """Stream a meeting summary using the meeting-specific LLM model.
 
     Args:
         body: ``{ "text": "<full transcript>" }``
 
     Returns:
         StreamingResponse of plain-text tokens.
-
-    Raises:
-        HTTPException: 400 if ``text`` is empty.
     """
     text = body.text.strip()
     if not text:
@@ -104,22 +171,13 @@ async def summarize(body: SummarizeRequest) -> StreamingResponse:
     truncated = len(text) > _MAX_TRANSCRIPT_CHARS
     if truncated:
         text = text[:_MAX_TRANSCRIPT_CHARS]
-        logger.warning(
-            "event=summarize_truncated original_chars={} limit={}",
-            len(body.text),
-            _MAX_TRANSCRIPT_CHARS,
-        )
+        logger.warning("event=summarize_truncated chars={}", len(body.text))
 
     messages: list[dict[str, str]] = [
         {"role": "system", "content": _SUMMARIZE_SYSTEM},
         {"role": "user", "content": f"Transcript:\n\n{text}"},
     ]
-
-    logger.info(
-        "event=summarize_start chars={} truncated={}",
-        len(text),
-        truncated,
-    )
+    logger.info("event=summarize_start chars={} truncated={}", len(text), truncated)
 
     async def token_stream() -> AsyncGenerator[bytes, None]:
         try:
@@ -134,47 +192,51 @@ async def summarize(body: SummarizeRequest) -> StreamingResponse:
 
 @router.post("/save")
 async def save_meeting(body: SaveRequest) -> dict:
-    """Save transcript and/or summary as text files in backend/recordings/.
+    """Save transcript and/or summary into a session-timestamped folder.
+
+    Files are written to ``backend/recordings/<session>/``.
 
     Args:
-        body: ``{ "transcript": "...", "summary": "..." }`` — either field optional.
+        body: ``{ "session": "20240115_143000", "transcript": "...", "summary": "..." }``
 
     Returns:
-        ``{ "saved": [list of absolute file paths written] }``
+        ``{ "saved": [paths], "session": "<folder name>" }``
     """
-    _RECORDINGS_DIR.mkdir(exist_ok=True)
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    d = _session_dir(body.session)
     saved: list[str] = []
 
     if body.transcript:
-        path = _RECORDINGS_DIR / f"transcript_{ts}.txt"
+        path = d / "transcript.txt"
         path.write_text(body.transcript, encoding="utf-8")
         saved.append(str(path))
-        logger.info("event=meeting_saved type=transcript path={}", path)
+        logger.info("event=meeting_saved type=transcript session={}", d.name)
 
     if body.summary:
-        path = _RECORDINGS_DIR / f"summary_{ts}.txt"
+        path = d / "summary.txt"
         path.write_text(body.summary, encoding="utf-8")
         saved.append(str(path))
-        logger.info("event=meeting_saved type=summary path={}", path)
+        logger.info("event=meeting_saved type=summary session={}", d.name)
 
-    return {"saved": saved}
+    return {"saved": saved, "session": d.name}
 
 
 @router.post("/save-audio")
-async def save_audio(audio: UploadFile = File(...)) -> dict:
-    """Save recorded meeting audio (WebM) to backend/recordings/.
+async def save_audio(
+    audio: UploadFile = File(...),
+    session: str = Form(default=""),
+) -> dict:
+    """Save recorded meeting audio into the session folder.
 
     Args:
-        audio: Uploaded WebM audio file.
+        audio: WebM audio file.
+        session: Session folder name (same value used in /save).
 
     Returns:
-        ``{ "path": "<absolute path written>" }``
+        ``{ "path": "<absolute path>", "session": "<folder name>" }``
     """
-    _RECORDINGS_DIR.mkdir(exist_ok=True)
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    path = _RECORDINGS_DIR / f"recording_{ts}.webm"
+    d = _session_dir(session or None)
+    path = d / "recording.webm"
     content = await audio.read()
     path.write_bytes(content)
-    logger.info("event=meeting_audio_saved path={} size_bytes={}", path, len(content))
-    return {"path": str(path)}
+    logger.info("event=meeting_audio_saved session={} size_bytes={}", d.name, len(content))
+    return {"path": str(path), "session": d.name}

@@ -311,7 +311,26 @@ class Settings(BaseSettings):
     stream_smart_turn_extractor_dir: Path = Path("models/smart_turn/whisper-base")
 
     # ─────────────────────────────────────────────────────────────────────────
-    # 11. STORAGE — local filesystem paths
+    # 11. MEETING RECORDER — higher-quality models; latency less critical here
+    # ─────────────────────────────────────────────────────────────────────────
+
+    # STT: use a larger Whisper variant for batch meeting transcription.
+    # If meeting_stt_model_dir exists on disk, it is used directly.
+    # Otherwise faster-whisper auto-downloads by meeting_stt_model_size name.
+    # Run `make meeting-models` to pre-download to models/meeting_stt/.
+    meeting_stt_model_size: str = "large-v3-turbo"
+    meeting_stt_model_dir: Path = Path("models/meeting_stt")
+    meeting_stt_beam_size: int = 5   # higher = better accuracy, slower
+
+    # LLM: override the default model for meeting summarization.
+    # For ollama providers set meeting_llm_model (e.g. "qwen2.5:7b").
+    # For llama-cpp set meeting_llm_llamacpp_model_path to a GGUF file.
+    # Leave empty to fall back to the default llm_model / llm_llamacpp_model_path.
+    meeting_llm_model: str = "qwen2.5:7b"
+    meeting_llm_llamacpp_model_path: Path = Path("models/meeting_llm/Qwen2.5-7B-Instruct-Q4_K_M.gguf")
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # 12. STORAGE — local filesystem paths
     # ─────────────────────────────────────────────────────────────────────────
     temp_dir: Path = Path(".cache/audio")
 

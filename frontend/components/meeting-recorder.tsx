@@ -28,7 +28,7 @@ const SEGMENT_INTERVAL_MS = 5_000;
 
 const LS_SEGMENTS = "nt-meeting-segments";
 const LS_SUMMARY  = "nt-meeting-summary";
-const LS_DURATION = "nt-meeting-duration";
+const LS_SESSION  = "nt-meeting-session";
 
 function getMimeType(): string {
   for (const t of ["audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus"]) {
@@ -125,24 +125,18 @@ function SaveIcon() {
 // ── Component ────────────────────────────────────────────────────────────────
 
 export function MeetingRecorder({ backendUrl, active = true }: Props) {
-  // ── State — initialised from localStorage for cross-session persistence ──
+  // ── State — empty on first render (avoids SSR/client hydration mismatch).
+  // localStorage is loaded in useEffect after mount.
 
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
   const [selectedDeviceId, setSelectedDeviceId] = useState("");
   const [isRecording, setIsRecording] = useState(false);
   const [elapsed, setElapsed] = useState(0);
-  const [segments, setSegments] = useState<Segment[]>(() => {
-    if (typeof window === "undefined") return [];
-    try { return JSON.parse(localStorage.getItem(LS_SEGMENTS) ?? "[]") as Segment[]; }
-    catch { return []; }
-  });
+  const [segments, setSegments] = useState<Segment[]>([]);
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [summary, setSummary] = useState<string>(() => {
-    if (typeof window === "undefined") return "";
-    return localStorage.getItem(LS_SUMMARY) ?? "";
-  });
+  const [summary, setSummary] = useState("");
   const [isSummarizing, setIsSummarizing] = useState(false);
   const [savedPaths, setSavedPaths] = useState<string[]>([]);
 
@@ -156,10 +150,23 @@ export function MeetingRecorder({ backendUrl, active = true }: Props) {
   const downloadUrlRef  = useRef<string | null>(null);
   const stoppedRef      = useRef(false);
   const elapsedRef      = useRef(0);
+  const sessionIdRef    = useRef<string>("");  // shared folder name for all 3 saved files
   const transcriptEndRef = useRef<HTMLDivElement | null>(null);
   const summaryEndRef   = useRef<HTMLDivElement | null>(null);
 
-  // ── localStorage persistence ─────────────────────────────────────────────
+  // ── localStorage — load after mount, persist on change ──────────────────
+
+  useEffect(() => {
+    // Runs only on client after hydration — safe to read localStorage here
+    try {
+      const saved = JSON.parse(localStorage.getItem(LS_SEGMENTS) ?? "[]") as Segment[];
+      if (saved.length) setSegments(saved);
+    } catch { /* corrupted */ }
+    const savedSummary = localStorage.getItem(LS_SUMMARY) ?? "";
+    if (savedSummary) setSummary(savedSummary);
+    const savedSession = localStorage.getItem(LS_SESSION) ?? "";
+    if (savedSession) sessionIdRef.current = savedSession;
+  }, []);  // empty deps = runs once after first mount
 
   useEffect(() => {
     try { localStorage.setItem(LS_SEGMENTS, JSON.stringify(segments)); }
@@ -208,10 +215,18 @@ export function MeetingRecorder({ backendUrl, active = true }: Props) {
       const resp = await fetch(`${backendUrl}/meeting/save`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ transcript: transcript ?? null, summary: sum ?? null }),
+        body: JSON.stringify({
+          session: sessionIdRef.current || null,
+          transcript: transcript ?? null,
+          summary: sum ?? null,
+        }),
       });
       if (resp.ok) {
-        const data = (await resp.json()) as { saved?: string[] };
+        const data = (await resp.json()) as { saved?: string[]; session?: string };
+        if (data.session) {
+          sessionIdRef.current = data.session;
+          localStorage.setItem(LS_SESSION, data.session);
+        }
         if (data.saved?.length) setSavedPaths((prev) => [...prev, ...data.saved!]);
       }
     } catch { /* backend unavailable */ }
@@ -228,7 +243,7 @@ export function MeetingRecorder({ backendUrl, active = true }: Props) {
     try {
       const form = new FormData();
       form.append("audio", blob, "segment.webm");
-      const resp = await fetch(`${backendUrl}/transcribe`, { method: "POST", body: form });
+      const resp = await fetch(`${backendUrl}/meeting/transcribe`, { method: "POST", body: form });
       if (!resp.ok) return;
       const data = (await resp.json()) as { text?: string };
       if (data.text?.trim()) {
@@ -264,6 +279,10 @@ export function MeetingRecorder({ backendUrl, active = true }: Props) {
     setSavedPaths([]);
     stoppedRef.current = false;
     elapsedRef.current = 0;
+    // New session folder for this recording
+    const newSession = new Date().toISOString().slice(0, 19).replace("T", "_").replace(/:/g, "-");
+    sessionIdRef.current = newSession;
+    localStorage.setItem(LS_SESSION, newSession);
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: selectedDeviceId ? { deviceId: { exact: selectedDeviceId } } : true,
@@ -283,9 +302,10 @@ export function MeetingRecorder({ backendUrl, active = true }: Props) {
         const url = URL.createObjectURL(blob);
         downloadUrlRef.current = url;
         setDownloadUrl(url);
-        // Upload audio to backend/recordings/
+        // Upload audio into the session folder
         const form = new FormData();
         form.append("audio", blob, "recording.webm");
+        form.append("session", sessionIdRef.current);
         void fetch(`${backendUrl}/meeting/save-audio`, { method: "POST", body: form })
           .then((r) => (r.ok ? r.json() : null))
           .then((data: { path?: string } | null) => {

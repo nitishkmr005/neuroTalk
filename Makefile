@@ -7,7 +7,8 @@ TTS_BACKEND  ?= kokoro
 
 .PHONY: setup backend-install frontend-install backend frontend dev run \
         check free-ports free-backend-port free-frontend-port \
-        ollama ollama-pull tts-envs tts-report install-llama-cpp
+        ollama ollama-pull tts-envs tts-report install-llama-cpp \
+        meeting-models meeting-llm-ollama
 
 # ── Install ───────────────────────────────────────────────────────────────────
 
@@ -35,6 +36,21 @@ tts-envs:
 
 tts-report: tts-envs
 	python3 scripts/tts.py
+
+meeting-models:  ## Download Whisper large-v3-turbo to backend/models/meeting_stt/
+	$(UV_BACKEND) run python -c "\
+from faster_whisper import WhisperModel; \
+print('Downloading Whisper large-v3-turbo...'); \
+WhisperModel('large-v3-turbo', device='cpu', compute_type='int8', download_root='models/meeting_stt'); \
+print('Done -> models/meeting_stt/')"
+
+meeting-llm-ollama:  ## Pull better Ollama model for meeting summarization
+	@if ollama list | grep -q "qwen2.5:7b"; then \
+		echo "qwen2.5:7b already downloaded"; \
+	else \
+		echo "Pulling qwen2.5:7b for meeting summarization..."; \
+		ollama pull qwen2.5:7b; \
+	fi
 
 # ── Servers ───────────────────────────────────────────────────────────────────
 
