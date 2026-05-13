@@ -98,6 +98,26 @@ def download_kokoro() -> None:
         sys.exit(1)
 
 
+def download_chatterbox() -> None:
+    dest = Path("models/chatterbox")
+    if (dest / "model.safetensors").exists():
+        print("Chatterbox TTS model already present — skipping.")
+        return
+    dest.mkdir(parents=True, exist_ok=True)
+    print("Downloading Chatterbox Turbo TTS model (mlx-community/chatterbox-turbo-fp16, ~3 GB) …")
+    try:
+        from huggingface_hub import snapshot_download
+        snapshot_download(
+            repo_id="mlx-community/chatterbox-turbo-fp16",
+            local_dir=str(dest),
+        )
+        print(f"  Saved to {dest}")
+    except Exception as err:
+        print(f"  Failed: {err}", file=sys.stderr)
+        print("  Install huggingface_hub: uv pip install huggingface_hub", file=sys.stderr)
+        sys.exit(1)
+
+
 def download_smart_turn() -> None:
     onnx_dest = Path("models/smart_turn/smart-turn-v3.2-cpu.onnx")
     extractor_dest = Path("models/smart_turn/whisper-base")
@@ -159,14 +179,21 @@ def main() -> None:
     parser.add_argument("--skip-stt", action="store_true")
     parser.add_argument("--skip-vad", action="store_true")
     parser.add_argument("--skip-kokoro", action="store_true")
+    parser.add_argument("--skip-chatterbox", action="store_true")
     parser.add_argument("--skip-smart-turn", action="store_true")
     parser.add_argument("--skip-llm", action="store_true")
     parser.add_argument("--only-llm", action="store_true", help="Download only the LLM GGUF model.")
+    parser.add_argument("--only-chatterbox", action="store_true", help="Download only the Chatterbox TTS model.")
     args = parser.parse_args()
 
     if args.only_llm:
         download_llm()
         print("\nLLM model ready.")
+        return
+
+    if args.only_chatterbox:
+        download_chatterbox()
+        print("\nChatterbox model ready.")
         return
 
     if not args.skip_stt:
@@ -175,6 +202,8 @@ def main() -> None:
         download_vad()
     if not args.skip_kokoro:
         download_kokoro()
+    if not args.skip_chatterbox:
+        download_chatterbox()
     if not args.skip_smart_turn:
         download_smart_turn()
     if not args.skip_llm:

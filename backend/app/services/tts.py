@@ -60,19 +60,16 @@ class TTSService:
         return model
 
     def _load_chatterbox(self) -> Any:
-        import torch
-        from chatterbox.tts_turbo import ChatterboxTurboTTS
-        device = (
-            "mps" if torch.backends.mps.is_available()
-            else "cuda" if torch.cuda.is_available()
-            else "cpu"
-        )
+        from mlx_audio.tts.utils import load_model as mlx_load_model
         local_dir = get_settings().tts_chatterbox_model_dir
-        if local_dir.exists():
-            model = ChatterboxTurboTTS.from_pretrained(str(local_dir), device=device)
-        else:
-            model = ChatterboxTurboTTS.from_pretrained(device=device)
-        model.generate(_WARMUP_TEXT)
+        if not local_dir.exists():
+            raise RuntimeError(
+                f"Chatterbox model not found at {local_dir}. "
+                "Run: make chatterbox-model"
+            )
+        model = mlx_load_model(local_dir)
+        for _ in model.generate(_WARMUP_TEXT):
+            pass
         return model
 
     def _run_inference(self, text: str, voice: str | None = None, speed: float | None = None) -> tuple[bytes, int]:
@@ -102,21 +99,38 @@ class TTSService:
         return buf.getvalue(), sample_rate
 
     def _run_chatterbox(self, text: str) -> tuple[bytes, int]:
-        import torch
-        waveform = self._model.generate(text)
-        samples = (
-            waveform.detach().cpu().squeeze().numpy()
-            if torch.is_tensor(waveform)
-            else np.asarray(waveform).squeeze()
+        from mlx_audio.tts.models.chatterbox_turbo.chatterbox_turbo import ChatterboxTurboTTS
+        is_turbo = isinstance(self._model, ChatterboxTurboTTS)
+        if is_turbo:
+            # Turbo: normalize tag variants and strip unknowns before T3 sees the text.
+            # Unrecognized [tags] are read aloud verbatim; canonical special tokens are not.
+            from app.utils.emotion import normalize_for_turbo
+            synthesis_text = normalize_for_turbo(text)
+            kwargs: dict = {}
+        else:
+            # Standard Chatterbox: strip tags from text, drive emotion via exaggeration float.
+            from app.utils.emotion import extract_exaggeration, strip_emotion_tags
+            synthesis_text = strip_emotion_tags(text)
+            kwargs = {"exaggeration": extract_exaggeration(text)}
+        logger.debug(
+            "event=chatterbox_infer is_turbo={} kwargs={} text_preview={!r}",
+            is_turbo, kwargs, synthesis_text[:60],
         )
+        chunks: list[np.ndarray] = []
+        sample_rate = self._model.sample_rate
+        for result in self._model.generate(synthesis_text, **kwargs):
+            chunks.append(np.asarray(result.audio).squeeze())
+        if not chunks:
+            raise RuntimeError("Chatterbox returned no audio")
+        samples = np.concatenate(chunks) if len(chunks) > 1 else chunks[0]
         pcm16 = (np.clip(samples, -1.0, 1.0) * 32767).astype(np.int16)
         buf = io.BytesIO()
         with wave.open(buf, "wb") as wf:
             wf.setnchannels(1)
             wf.setsampwidth(2)
-            wf.setframerate(self._model.sr)
+            wf.setframerate(sample_rate)
             wf.writeframes(pcm16.tobytes())
-        return buf.getvalue(), self._model.sr
+        return buf.getvalue(), sample_rate
 
     async def synthesize(self, text: str, voice: str | None = None, speed: float | None = None) -> tuple[bytes, int]:
         if self._model is None:

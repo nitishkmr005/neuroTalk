@@ -1,8 +1,16 @@
+import os
 import sys
 
 from loguru import logger
 
 from config.settings import get_settings
+
+# Suppress tqdm progress bars from mlx_audio (Chatterbox token generation bars
+# go to stderr and pollute structured log output on every TTS call).
+os.environ.setdefault("TQDM_DISABLE", "1")
+# Suppress the "model of type chatterbox_turbo to instantiate model of type ''"
+# warning from HuggingFace transformers when loading the Chatterbox tokenizer.
+os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
 
 # Log events that indicate a model is being loaded or invoked.
 # Matching messages are rendered in bold green so they stand out in the terminal.
