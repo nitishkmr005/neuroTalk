@@ -28,6 +28,7 @@ from app.services.llm import warmup_llamacpp
 from app.services.stt import get_stt_service
 from app.services.tts import get_available_voices, get_tts_service
 from app.services.vad import get_vad_service
+from app.meeting.router import router as meeting_router  # meeting recorder feature
 from app.webrtc.router import router as webrtc_router
 from config.logging import setup_logging
 from config.settings import get_settings
@@ -37,6 +38,7 @@ settings = get_settings()
 
 app = FastAPI(title=settings.app_name, version="0.1.0")
 app.include_router(webrtc_router)
+app.include_router(meeting_router)  # meeting recorder feature
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
