@@ -836,6 +836,11 @@ button {
   grid-template-rows: auto 1fr;
 }
 
+/* Meeting mode: when summary is also visible, split the two panels equally */
+.telemetry-stack.meeting-split {
+  grid-template-rows: 1fr 1fr;
+}
+
 .telemetry-panel {
   display: flex;
   flex-direction: column;

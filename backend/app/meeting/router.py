@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import AsyncGenerator
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 from loguru import logger
 from pydantic import BaseModel
@@ -159,3 +159,22 @@ async def save_meeting(body: SaveRequest) -> dict:
         logger.info("event=meeting_saved type=summary path={}", path)
 
     return {"saved": saved}
+
+
+@router.post("/save-audio")
+async def save_audio(audio: UploadFile = File(...)) -> dict:
+    """Save recorded meeting audio (WebM) to backend/recordings/.
+
+    Args:
+        audio: Uploaded WebM audio file.
+
+    Returns:
+        ``{ "path": "<absolute path written>" }``
+    """
+    _RECORDINGS_DIR.mkdir(exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    path = _RECORDINGS_DIR / f"recording_{ts}.webm"
+    content = await audio.read()
+    path.write_bytes(content)
+    logger.info("event=meeting_audio_saved path={} size_bytes={}", path, len(content))
+    return {"path": str(path)}

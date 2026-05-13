@@ -24,7 +24,7 @@ interface Props {
 }
 
 const MAX_SEGMENT_BYTES = 4 * 1024 * 1024;
-const SEGMENT_INTERVAL_MS = 8_000;
+const SEGMENT_INTERVAL_MS = 5_000;
 
 const LS_SEGMENTS = "nt-meeting-segments";
 const LS_SUMMARY  = "nt-meeting-summary";
@@ -283,6 +283,15 @@ export function MeetingRecorder({ backendUrl, active = true }: Props) {
         const url = URL.createObjectURL(blob);
         downloadUrlRef.current = url;
         setDownloadUrl(url);
+        // Upload audio to backend/recordings/
+        const form = new FormData();
+        form.append("audio", blob, "recording.webm");
+        void fetch(`${backendUrl}/meeting/save-audio`, { method: "POST", body: form })
+          .then((r) => (r.ok ? r.json() : null))
+          .then((data: { path?: string } | null) => {
+            if (data?.path) setSavedPaths((prev) => [...prev, data.path!]);
+          })
+          .catch(() => undefined);
       };
       masterRec.start(500);
       masterRecRef.current = masterRec;
@@ -548,7 +557,7 @@ export function MeetingRecorder({ backendUrl, active = true }: Props) {
       </article>
 
       {/* ── Right: transcript + summary ── */}
-      <aside className="telemetry-stack">
+      <aside className={`telemetry-stack${hasSummary || isSummarizing ? " meeting-split" : ""}`}>
 
         {/* Transcript panel */}
         <article className="surface transcript-panel">
@@ -561,7 +570,7 @@ export function MeetingRecorder({ backendUrl, active = true }: Props) {
             </div>
           </div>
 
-          <div className="chat-feed">
+          <div className="chat-thread">
             {hasTranscript ? (
               <>
                 {segments.map((seg, i) => (
@@ -605,7 +614,7 @@ export function MeetingRecorder({ backendUrl, active = true }: Props) {
               <p className="kicker">Meeting Summary</p>
               {isSummarizing && <span className="status-pill is-live">Generating…</span>}
             </div>
-            <div className="chat-feed meeting-summary-body">
+            <div className="chat-thread meeting-summary-body">
               {renderMarkdown(summary)}
               {isSummarizing && <span className="meeting-rec-cursor" aria-hidden="true" />}
               <div ref={summaryEndRef} />
