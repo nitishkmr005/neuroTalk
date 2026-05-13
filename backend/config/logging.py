@@ -25,6 +25,8 @@ _MODEL_EVENTS: frozenset[str] = frozenset({
     "event=smart_turn_loaded",
     # Meeting recorder
     "event=meeting_transcribe_done",
+    "event=meeting_stt_dispatch",
+    "event=meeting_llm_dispatch",
 })
 
 

@@ -86,6 +86,10 @@ async def _dispatch(messages: list[dict[str, str]]) -> AsyncGenerator[str, None]
         settings = settings.model_copy(update=overrides)
 
     provider = settings.llm_provider
+    model_label = (
+        str(settings.llm_llamacpp_model_path) if provider == "llama-cpp" else settings.llm_model
+    )
+    logger.info("event=meeting_llm_dispatch provider={} model={}", provider, model_label)
 
     if provider == "ollama":
         async for t in _stream_ollama(messages, settings):
@@ -125,6 +129,11 @@ async def transcribe_meeting_segment(audio: UploadFile = File(...)) -> dict:
     from config.settings import get_settings
 
     settings = get_settings()
+    logger.info(
+        "event=meeting_stt_dispatch model={} beam_size={}",
+        settings.meeting_stt_model_size,
+        settings.meeting_stt_beam_size,
+    )
     request_id = uuid4().hex[:8]
     content = await audio.read()
     if not content:
