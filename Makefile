@@ -45,18 +45,18 @@ WhisperModel('large-v3-turbo', device='cpu', compute_type='int8', download_root=
 print('Done -> models/meeting_stt/')"
 
 meeting-llm-gguf:  ## Download Qwen3-8B Q4_K_M GGUF to backend/models/meeting_llm/
-	@if [ -f backend/models/meeting_llm/qwen3-8b-q4_k_m.gguf ]; then \
-		echo "qwen3-8b-q4_k_m.gguf already downloaded"; \
+	@if [ -f backend/models/meeting_llm/Qwen3-8B-Q4_K_M.gguf ]; then \
+		echo "Qwen3-8B-Q4_K_M.gguf already downloaded"; \
 	else \
 		echo "Downloading Qwen3-8B Q4_K_M GGUF (~5 GB) ..."; \
 		$(UV_BACKEND) run python -c "\
 from huggingface_hub import hf_hub_download; \
 hf_hub_download(\
     repo_id='Qwen/Qwen3-8B-GGUF', \
-    filename='qwen3-8b-q4_k_m.gguf', \
+    filename='Qwen3-8B-Q4_K_M.gguf', \
     local_dir='models/meeting_llm', \
 ); \
-print('Done -> backend/models/meeting_llm/qwen3-8b-q4_k_m.gguf')"; \
+print('Done -> backend/models/meeting_llm/Qwen3-8B-Q4_K_M.gguf')"; \
 	fi
 
 meeting-llm-ollama: ollama  ## Pull Ollama model for meeting summarization

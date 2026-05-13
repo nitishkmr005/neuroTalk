@@ -325,9 +325,9 @@ class Settings(BaseSettings):
     # real-time voice agent so quality is prioritised over latency.
     # meeting_llm_provider: "ollama" | "openai" | "anthropic" | "gemini" | "llama-cpp" | ""
     # Leave empty to reuse the main llm_provider.
-    meeting_llm_provider: str = "ollama"
+    meeting_llm_provider: str = "llama-cpp"
     meeting_llm_model: str = "qwen3:8b"        # ollama model (already pulled)
-    meeting_llm_llamacpp_model_path: Path = Path("models/meeting_llm/qwen3-8b-q4_k_m.gguf")
+    meeting_llm_llamacpp_model_path: Path = Path("models/meeting_llm/Qwen3-8B-Q4_K_M.gguf")
 
     # ─────────────────────────────────────────────────────────────────────────
     # 12. STORAGE — local filesystem paths
