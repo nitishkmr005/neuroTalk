@@ -327,7 +327,7 @@ class Settings(BaseSettings):
     # Leave empty to reuse the main llm_provider.
     meeting_llm_provider: str = "ollama"
     meeting_llm_model: str = "qwen3:8b"        # ollama model (already pulled)
-    meeting_llm_llamacpp_model_path: Path = Path("models/meeting_llm/Qwen2.5-7B-Instruct-Q4_K_M.gguf")
+    meeting_llm_llamacpp_model_path: Path = Path("models/meeting_llm/qwen3-8b-q4_k_m.gguf")
 
     # ─────────────────────────────────────────────────────────────────────────
     # 12. STORAGE — local filesystem paths

@@ -8,7 +8,7 @@ TTS_BACKEND  ?= kokoro
 .PHONY: setup backend-install frontend-install backend frontend dev run \
         check free-ports free-backend-port free-frontend-port \
         ollama ollama-pull tts-envs tts-report install-llama-cpp \
-        meeting-models meeting-llm-ollama
+        meeting-models meeting-llm-ollama meeting-llm-gguf
 
 # ── Install ───────────────────────────────────────────────────────────────────
 
@@ -43,6 +43,21 @@ from faster_whisper import WhisperModel; \
 print('Downloading Whisper large-v3-turbo...'); \
 WhisperModel('large-v3-turbo', device='cpu', compute_type='int8', download_root='models/meeting_stt'); \
 print('Done -> models/meeting_stt/')"
+
+meeting-llm-gguf:  ## Download Qwen3-8B Q4_K_M GGUF to backend/models/meeting_llm/
+	@if [ -f backend/models/meeting_llm/qwen3-8b-q4_k_m.gguf ]; then \
+		echo "qwen3-8b-q4_k_m.gguf already downloaded"; \
+	else \
+		echo "Downloading Qwen3-8B Q4_K_M GGUF (~5 GB) ..."; \
+		$(UV_BACKEND) run python -c "\
+from huggingface_hub import hf_hub_download; \
+hf_hub_download(\
+    repo_id='Qwen/Qwen3-8B-GGUF', \
+    filename='qwen3-8b-q4_k_m.gguf', \
+    local_dir='models/meeting_llm', \
+); \
+print('Done -> backend/models/meeting_llm/qwen3-8b-q4_k_m.gguf')"; \
+	fi
 
 meeting-llm-ollama: ollama  ## Pull Ollama model for meeting summarization
 	@if ollama list | grep -q "qwen3:8b"; then \
