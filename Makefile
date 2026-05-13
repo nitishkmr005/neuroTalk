@@ -3,19 +3,21 @@ NPM_FRONTEND  = npm --prefix frontend
 BACKEND_PORT  = 8000
 FRONTEND_PORT = 3000
 LLM_MODEL     = llama3.2:3b #gemma3:1b
-TTS_BACKEND  ?= kokoro
+TTS_BACKEND  ?= chatterbox#kokoro
 
 .PHONY: setup backend-install frontend-install backend frontend dev run \
         check free-ports free-backend-port free-frontend-port \
         ollama ollama-pull tts-envs tts-report install-llama-cpp \
-        meeting-models meeting-llm-ollama meeting-llm-gguf
+        chatterbox-model meeting-models meeting-llm-ollama meeting-llm-gguf
 
 # ── Install ───────────────────────────────────────────────────────────────────
 
 setup: backend-install frontend-install
 
 backend-install:
-	CMAKE_ARGS="-DGGML_METAL=on" $(UV_BACKEND) sync --group $(TTS_BACKEND)_model --group deepfilter --group llama_cpp_llm
+	# NOTE: TTS_BACKEND=chatterbox at runtime uses mlx-audio (kokoro_model group) — no separate install needed.
+	# To switch TTS at runtime, set TTS_BACKEND=chatterbox in backend/.env, then run: make chatterbox-model
+	CMAKE_ARGS="-DGGML_METAL=on" $(UV_BACKEND) sync --group kokoro_model --group deepfilter --group llama_cpp_llm
 
 install-llama-cpp:
 	@if $(UV_BACKEND) run python -c "import llama_cpp" 2>/dev/null; then \
@@ -36,6 +38,9 @@ tts-envs:
 
 tts-report: tts-envs
 	python3 scripts/tts.py
+
+chatterbox-model:  ## Download Chatterbox Turbo TTS model (~3 GB) to backend/models/chatterbox/
+	$(UV_BACKEND) run python scripts/download_models.py --only-chatterbox
 
 meeting-models:  ## Download Whisper large-v3-turbo to backend/models/meeting_stt/
 	$(UV_BACKEND) run python -c "\

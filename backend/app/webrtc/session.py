@@ -23,7 +23,7 @@ from app.services.llm import stream_llm_response      # LLM token streaming (all
 from app.services.stt import get_stt_service          # Whisper speech-to-text
 from app.services.tts import get_tts_service          # Kokoro/Chatterbox TTS synthesis
 from app.services.vad import StreamingVAD, get_vad_service  # Silero voice activity detection
-from app.utils.emotion import clean_for_tts, strip_emotion_tags  # Remove [emotion] tags from LLM output
+from app.utils.emotion import clean_for_tts  # Strip markdown/emoji before TTS synthesis
 from config.settings import get_settings  # Singleton Pydantic settings object
 
 # Matches utterances that mean "please wait/pause" so we don't forward them to the LLM
@@ -834,10 +834,10 @@ class WebRTCSession:
 
                 full_response += token  # Append this token to the growing response
                 await self._send_json(
-                    {"type": "llm_partial", "llm_seq": llm_seq, "text": strip_emotion_tags(full_response)}
+                    {"type": "llm_partial", "llm_seq": llm_seq, "text": full_response}
                 )
                 # Send the running text to the browser for live display (streaming typewriter effect)
-                # strip_emotion_tags() removes [happy], [sad] etc. markers before displaying
+                # Emotion tags like [laugh] are kept so the transcript shows the agent's expressed feeling
 
                 # Extract complete sentences and enqueue for immediate TTS.
                 tail = full_response[processed_chars:]
@@ -854,9 +854,8 @@ class WebRTCSession:
                     tail = full_response[processed_chars:]  # Update tail to remaining text
 
             llm_ms = round((perf_counter() - llm_t0) * 1000, 2)  # Total LLM time in ms
-            display_text = strip_emotion_tags(full_response)  # Clean version for browser display
             await self._send_json(
-                {"type": "llm_final", "llm_seq": llm_seq, "text": display_text, "llm_ms": llm_ms}
+                {"type": "llm_final", "llm_seq": llm_seq, "text": full_response, "llm_ms": llm_ms}
             )
             # Tell browser the LLM is done and here's the full response + latency
 

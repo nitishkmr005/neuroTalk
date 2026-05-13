@@ -4,6 +4,17 @@ import re
 
 _TAG_PATTERN = re.compile(r"\[[^\]]+\]")
 
+# Maps LLM emotion tags to Chatterbox exaggeration values (0.0–1.0).
+# Higher = more expressive / dramatic delivery.
+_EMOTION_EXAGGERATION: dict[str, float] = {
+    "[gasp]": 0.8,
+    "[laugh]": 0.7,
+    "[chuckle]": 0.6,
+    "[sigh]": 0.55,
+    "[clear throat]": 0.35,
+}
+_BASE_EXAGGERATION = 0.3
+
 _EMOJI_PATTERN = re.compile(
     "["
     "\U0001F600-\U0001F64F"
@@ -25,6 +36,23 @@ _MARKDOWN_PATTERN = re.compile(
     r"|^\s*\d+\.\s+",
     re.MULTILINE,
 )
+
+
+def extract_exaggeration(text: str) -> float:
+    """Return a Chatterbox exaggeration value based on the dominant emotion tag in text.
+
+    Args:
+        text: LLM response string that may contain bracketed emotion tags.
+
+    Returns:
+        Float in [0.3, 0.8]; higher = more expressive delivery.
+        Falls back to 0.3 (neutral) when no recognised tag is found.
+    """
+    lower = text.lower()
+    return max(
+        (_EMOTION_EXAGGERATION[tag] for tag in _EMOTION_EXAGGERATION if tag in lower),
+        default=_BASE_EXAGGERATION,
+    )
 
 
 def strip_emotion_tags(text: str) -> str:
