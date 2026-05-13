@@ -41,6 +41,9 @@ async def web_search(query: str) -> list[dict[str, str]]:
         return results
 
     try:
+        # Run the blocking DuckDuckGo search in a thread pool executor
+        # and enforce the configured timeout so the async pipeline
+        # does not stall if the search hangs or is too slow.
         loop = asyncio.get_event_loop()
         return await asyncio.wait_for(
             loop.run_in_executor(None, _run),
